@@ -118,6 +118,7 @@ def process_posts(
 
 def run(
     source_id: str | None = None,
+    group: str | None = None,
     mock: bool = False,
     limit: int | None = None,
     db_path: Path | str | None = None,
@@ -131,6 +132,7 @@ def run(
 
     Args:
         source_id: Facebook group/page ID or full URL, or mock source name.
+        group: Facebook Group URL(s) or ID(s) to search inside.
         mock: If True, uses MockFacebookCollector without live API.
         limit: Max number of posts to retrieve.
         db_path: Optional custom SQLite path.
@@ -143,16 +145,17 @@ def run(
     settings = get_settings()
     actual_limit = limit or settings.collector_limit
     if selenium:
-        if not keyword and not source_id:
-            raise ValueError("--keyword (hoặc --source) is required when using --selenium.")
-        if source_id and keyword:
-            effective_source_id = f"{source_id}||{keyword}"
-        elif source_id:
-            effective_source_id = source_id
-        else:
-            effective_source_id = keyword
+        target_group = group or source_id or settings.facebook_group_url or settings.facebook_source_id
+        target_keyword = (keyword or "tìm gia sư").strip()
+        if not target_group:
+            raise ValueError(
+                "Yêu cầu cung cấp link hoặc ID Nhóm Facebook để tìm kiếm theo nhóm!\n"
+                "Ví dụ: python main.py --selenium --group 'https://www.facebook.com/groups/...' --keyword 'tìm gia sư'\n"
+                "(hoặc cấu hình FACEBOOK_GROUP_URL trong file .env)"
+            )
+        effective_source_id = f"{target_group}||{target_keyword}"
     else:
-        effective_source_id = source_id or settings.facebook_source_id or "default_source"
+        effective_source_id = group or source_id or settings.facebook_source_id or "default_source"
 
     logger.info("Starting collector")
 
@@ -274,6 +277,12 @@ def parse_args() -> argparse.Namespace:
         help="Chrome profile name, for example: 'Profile 7' or '7'.",
     )
     parser.add_argument(
+        "--group",
+        type=str,
+        default=None,
+        help="Facebook Group URL or numeric ID (e.g. 'https://www.facebook.com/groups/123456789/')",
+    )
+    parser.add_argument(
         "--source",
         type=str,
         default=None,
@@ -331,6 +340,7 @@ def main() -> None:
                 try:
                     stats = run(
                         source_id=args.source,
+                        group=args.group,
                         mock=args.mock,
                         limit=args.limit,
                         db_path=args.db_path,
@@ -354,6 +364,7 @@ def main() -> None:
         try:
             stats = run(
                 source_id=args.source,
+                group=args.group,
                 mock=args.mock,
                 limit=args.limit,
                 db_path=args.db_path,

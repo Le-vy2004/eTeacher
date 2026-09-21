@@ -285,7 +285,39 @@ New leads: 0
 
 ---
 
-## 6. Cấu Hình Facebook API Hợp Lệ
+## 6. Chế Độ Quét Nhóm Facebook Qua Chrome Profile (Selenium)
+
+Hệ thống hỗ trợ truy cập trực tiếp vào **Nhóm Facebook (Group)**, tự động tìm kiếm theo từ khóa bên trong nhóm, trích xuất chính xác permalink của bài viết, tác giả, thời gian đăng và nội dung đầy đủ để đổ về Google Sheets.
+
+### 6.1. Cấu hình nhanh qua file `.env`
+Điền link nhóm mặc định vào file `.env`:
+```env
+FACEBOOK_GROUP_URL=https://www.facebook.com/groups/your_group_id/
+PROFILE_NAME=Profile 7
+```
+
+### 6.2. Lệnh chạy tìm kiếm trong Nhóm
+
+- **Chạy với nhóm và từ khóa chỉ định:**
+  ```powershell
+  .\.venv\Scripts\python.exe main.py --selenium --group "https://www.facebook.com/groups/123456789/" --keyword "tìm gia sư"
+  ```
+- **Chạy quét nhiều nhóm cùng lúc (cách nhau bằng dấu phẩy):**
+  ```powershell
+  .\.venv\Scripts\python.exe main.py --selenium --group "https://www.facebook.com/groups/nhom1,https://www.facebook.com/groups/nhom2" --keyword "tìm gia sư"
+  ```
+- **Cấu trúc dữ liệu đổ về Google Sheets:**
+  - Cột A: **Link bài viết** (Link permalink chuẩn, click vào xem trực tiếp bài đăng)
+  - Cột B: **Tên người đăng**
+  - Cột C: **Thời gian**
+  - Cột D: **Nội dung bài đăng** (Đã bấm "Xem thêm" để lấy trọn vẹn nội dung)
+  - Cột E: **Nhóm**
+  - Cột F: **Từ khóa khớp**
+  - Cột G: **Thời gian thu thập**
+
+---
+
+## 7. Cấu Hình Facebook Graph API Hợp Lệ
 
 Khi có quyền truy cập hợp lệ từ Meta for Developers:
 

@@ -50,6 +50,9 @@ class Settings(BaseModel):
     facebook_source_id: str = Field(
         default_factory=lambda: os.getenv("FACEBOOK_SOURCE_ID", "").strip()
     )
+    facebook_group_url: str = Field(
+        default_factory=lambda: os.getenv("FACEBOOK_GROUP_URL", "").strip()
+    )
 
     # Google Sheets
     google_credentials_file: str = Field(

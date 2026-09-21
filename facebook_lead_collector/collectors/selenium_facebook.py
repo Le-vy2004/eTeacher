@@ -1,13 +1,18 @@
-"""Facebook public-post search collector using an existing Chrome profile."""
-from datetime import datetime
+"""Facebook Group search collector using an existing Chrome profile.
+
+Navigates directly to specified Facebook Group(s), searches by keyword inside the group,
+and extracts verified post permalinks, author, post time, and content.
+"""
+from datetime import datetime, timedelta
 import hashlib
 from pathlib import Path
 import random
+import re
 import shutil
 import sys
 import time
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse, parse_qs, urlencode
 
 if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -18,15 +23,39 @@ from models.post import FacebookPost
 from utils.logger import logger
 
 
+def normalize_group_url(raw: str) -> str:
+    """Normalize user input to a canonical Facebook group URL."""
+    clean = (raw or "").strip().rstrip("/")
+    if not clean:
+        return ""
+    if clean.startswith("http://") or clean.startswith("https://"):
+        parsed = urlparse(clean)
+        path = parsed.path.rstrip("/")
+        return f"https://www.facebook.com{path}"
+    if clean.isdigit():
+        return f"https://www.facebook.com/groups/{clean}"
+    if clean.startswith("groups/"):
+        return f"https://www.facebook.com/{clean}"
+    return f"https://www.facebook.com/groups/{clean}"
+
+
+def build_group_search_url(group_url: str, keyword: str) -> str:
+    """Construct Facebook group search URL."""
+    clean_group = normalize_group_url(group_url)
+    if clean_group.endswith("/search"):
+        return f"{clean_group}/?q={quote_plus(keyword)}"
+    return f"{clean_group}/search/?q={quote_plus(keyword)}"
+
+
 class SeleniumFacebookSearchCollector(BaseCollector):
-    """Collect visible Facebook search results with a locally logged-in Chrome profile."""
+    """Collect visible Facebook posts from Facebook Groups with a locally logged-in Chrome profile."""
 
     def __init__(
         self,
         user_data_dir: str | Path | None = None,
         profile_name: str | None = None,
-        scrolls: int = 3,
-        sleep_range: tuple[float, float] = (4.0, 7.0),
+        scrolls: int = 4,
+        sleep_range: tuple[float, float] = (3.5, 6.0),
         driver: Any | None = None,
     ):
         settings = get_settings()
@@ -97,6 +126,7 @@ class SeleniumFacebookSearchCollector(BaseCollector):
             logger.info(f"Synchronized isolated Chrome profile at {isolated_profile}")
         except OSError as error:
             logger.warning(f"Profile synchronization noticed non-fatal issue: {error}")
+
         source_local_state = self.user_data_dir / "Local State"
         isolated_local_state = isolated_dir / "Local State"
         if source_local_state.is_file():
@@ -109,7 +139,6 @@ class SeleniumFacebookSearchCollector(BaseCollector):
     def _build_driver(self) -> Any:
         try:
             from selenium import webdriver
-            from selenium.common.exceptions import TimeoutException
             from selenium.webdriver.chrome.options import Options
         except ImportError as error:
             raise RuntimeError(
@@ -121,7 +150,7 @@ class SeleniumFacebookSearchCollector(BaseCollector):
         if not self.user_data_dir.is_dir():
             raise ValueError(f"Chrome user-data directory does not exist: {self.user_data_dir}")
         if not self.profile_name:
-            raise ValueError("PROFILE_NAME must contain a Chrome profile directory name, usually 'Default'.")
+            raise ValueError("PROFILE_NAME must contain a Chrome profile directory name, usually 'Profile 7' or 'Default'.")
 
         self.user_data_dir = self._prepare_user_data_dir()
         options = Options()
@@ -137,91 +166,96 @@ class SeleniumFacebookSearchCollector(BaseCollector):
         options.add_argument("--no-default-browser-check")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
+
         driver = webdriver.Chrome(options=options)
-        driver.set_page_load_timeout(30)
+        driver.set_page_load_timeout(35)
         return driver
 
     @staticmethod
     def _parse_time(raw_time: str) -> datetime:
-        try:
-            return datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return datetime.now()
-
-    @staticmethod
-    def _post_url(article) -> str | None:
-        from selenium.webdriver.common.by import By
-
-        links = article.find_elements(By.CSS_SELECTOR, "a[href]")
-        for link in links:
-            href = link.get_attribute("href") or ""
-            if "/posts/" in href or "story_fbid=" in href or "/permalink/" in href:
-                return href.split("?")[0]
-        return None
-
-    @staticmethod
-    def _clean_post_url(raw_url: str) -> str:
-        """Sanitize Facebook URL by stripping tracking parameters while keeping critical query IDs."""
-        if not raw_url:
-            return ""
-        try:
-            import urllib.parse
-            parsed = urllib.parse.urlparse(raw_url)
-            path = parsed.path.rstrip("/")
-            if "/posts/" in path or "/permalink/" in path:
-                return f"https://www.facebook.com{path}"
-            
-            qs = urllib.parse.parse_qs(parsed.query)
-            important_keys = ["story_fbid", "id", "fbid", "set"]
-            clean_qs = {k: qs[k][0] for k in important_keys if k in qs and qs[k]}
-            if clean_qs:
-                return f"https://www.facebook.com{path}?{urllib.parse.urlencode(clean_qs)}"
-            return f"https://www.facebook.com{path}"
-        except Exception:
-            return raw_url.split("?")[0]
-
-    @staticmethod
-    def _parse_time(raw_time: str) -> datetime:
+        """Parse human-readable Vietnamese Facebook timestamps or ISO format."""
         if not raw_time:
             return datetime.now()
+        raw = raw_time.strip().lower()
+
+        # Check ISO datetime
         try:
-            return datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+            return datetime.fromisoformat(raw.replace("z", "+00:00"))
         except (TypeError, ValueError):
-            return datetime.now()
+            pass
+
+        now = datetime.now()
+        # "vừa xong" / "just now"
+        if "vừa xong" in raw or "just now" in raw:
+            return now
+
+        # Minutes ago: "15 phút", "15 mins", "15m"
+        m_match = re.search(r"(\d+)\s*(phút|min|m\b)", raw)
+        if m_match:
+            mins = int(m_match.group(1))
+            return now - timedelta(minutes=mins)
+
+        # Hours ago: "2 giờ", "2 hrs", "2h"
+        h_match = re.search(r"(\d+)\s*(giờ|hr|h\b)", raw)
+        if h_match:
+            hrs = int(h_match.group(1))
+            return now - timedelta(hours=hrs)
+
+        # Days ago: "3 ngày", "3 days", "3d"
+        d_match = re.search(r"(\d+)\s*(ngày|day|d\b)", raw)
+        if d_match:
+            days = int(d_match.group(1))
+            return now - timedelta(days=days)
+
+        # "Hôm qua lúc HH:MM"
+        if "hôm qua" in raw or "yesterday" in raw:
+            time_match = re.search(r"(\d{1,2}):(\d{2})", raw)
+            yesterday = now - timedelta(days=1)
+            if time_match:
+                return yesterday.replace(hour=int(time_match.group(1)), minute=int(time_match.group(2)), second=0)
+            return yesterday
+
+        # "15 tháng 9 lúc 08:30" or "15 tháng 9, 2025"
+        date_match = re.search(r"(\d{1,2})\s*tháng\s*(\d{1,2})", raw)
+        if date_match:
+            day = int(date_match.group(1))
+            month = int(date_match.group(2))
+            year_match = re.search(r"(\d{4})", raw)
+            year = int(year_match.group(1)) if year_match else now.year
+            time_match = re.search(r"(\d{1,2}):(\d{2})", raw)
+            hour = int(time_match.group(1)) if time_match else 0
+            minute = int(time_match.group(2)) if time_match else 0
+            try:
+                return datetime(year, month, day, hour, minute)
+            except ValueError:
+                pass
+
+        return now
 
     @staticmethod
     def _has_logged_in_session(driver) -> bool:
-        """Confirm the browser has an active Facebook session before searching."""
+        """Confirm the browser has an active Facebook session."""
         current_url = (driver.current_url or "").lower()
         cookie_names = {cookie.get("name") for cookie in driver.get_cookies()}
         if "/login" in current_url or "/checkpoint" in current_url:
-            logger.warning(
-                f"Facebook session is on an authentication page: url={driver.current_url}, "
-                f"title={driver.title!r}"
-            )
             return False
-
         if "c_user" not in cookie_names:
-            logger.warning(
-                f"Facebook session cookie c_user is missing: url={driver.current_url}, "
-                f"title={driver.title!r}, cookies={sorted(cookie_names)}"
-            )
             return False
 
         from selenium.webdriver.common.by import By
-
         login_fields = driver.find_elements(
             By.CSS_SELECTOR,
             "input[name='email'], input[name='pass']",
         )
         return not login_fields
 
-    def _extract_posts_js(self, driver, limit: int = 100) -> list[dict[str, Any]]:
-        """Extract posts using client-side JavaScript executing in browser DOM."""
+    def _extract_posts_js(self, driver, group_name_fallback: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Extract Facebook posts using robust JavaScript executing in browser DOM."""
         js_script = """
         const maxLimit = arguments[0] || 100;
+        const defaultGroupName = arguments[1] || 'Facebook Group';
 
-        // 1. Expand all 'Xem thêm' / 'See more' buttons
+        // 1. Expand all 'Xem thêm' / 'See more' buttons to reveal full content
         try {
             const buttons = Array.from(document.querySelectorAll('div[role="button"], span[role="button"], span'));
             for (const btn of buttons) {
@@ -232,128 +266,132 @@ class SeleniumFacebookSearchCollector(BaseCollector):
             }
         } catch(e) {}
 
-        const isPostLink = (href) => {
-            if (!href) return false;
-            return (
-                href.includes('/posts/') ||
-                href.includes('/permalink/') ||
-                href.includes('story_fbid=') ||
-                href.includes('/photo.php') ||
-                href.includes('/videos/') ||
-                href.includes('/watch/') ||
-                (href.includes('/groups/') && (href.includes('/user/') || href.includes('/multi_permalinks/')))
-            );
-        };
-
-        const cleanUrl = (raw) => {
+        // Helper: Clean Facebook post permalink
+        const cleanPostUrl = (raw) => {
             if (!raw) return '';
             try {
                 const u = new URL(raw, window.location.origin);
                 const path = u.pathname.replace(/\\/+$/, '');
-                if (path.includes('/posts/') || path.includes('/permalink/')) {
-                    return u.origin + path;
+
+                // Standard group post: /groups/123/posts/456 or /groups/slug/posts/456
+                const postMatch = path.match(/(\\/groups\\/[^\\/]+\\/(?:posts|permalink)\\/\\d+)/);
+                if (postMatch) {
+                    return u.origin + postMatch[1] + '/';
                 }
+
+                // story_fbid pattern
                 if (u.searchParams.has('story_fbid')) {
                     const fbid = u.searchParams.get('story_fbid');
-                    const id = u.searchParams.get('id') || '';
-                    return u.origin + path + '?story_fbid=' + fbid + (id ? '&id=' + id : '');
+                    const groupMatch = path.match(/(\\/groups\\/[^\\/]+)/);
+                    if (groupMatch) {
+                        return u.origin + groupMatch[1] + '/posts/' + fbid + '/';
+                    }
+                    const id = u.searchParams.get('id');
+                    return u.origin + '/permalink.php?story_fbid=' + fbid + (id ? '&id=' + id : '');
                 }
-                if (u.searchParams.has('fbid')) {
-                    return u.origin + path + '?fbid=' + u.searchParams.get('fbid');
+
+                // General post permalink
+                if (path.includes('/posts/') || path.includes('/permalink/')) {
+                    // Strip tracking params
+                    ['__cft__[0]', '__tn__', 'ref', 'mibextid', 'fbclid', 'rdid'].forEach(p => u.searchParams.delete(p));
+                    return u.origin + path + (u.search ? u.search : '') + (path.endsWith('/') ? '' : '/');
                 }
-                ['__cft__[0]', '__tn__', 'ref', 'mibextid', 'fbclid'].forEach(p => u.searchParams.delete(p));
-                return u.toString();
+
+                return '';
             } catch(e) {
-                return raw.split('?')[0];
+                return '';
             }
         };
 
-        // 2. Locate post container elements
-        const candidateCards = [];
-        const seenElements = new Set();
+        // Helper: Find valid post permalink in a card
+        const findPostUrl = (card) => {
+            const links = Array.from(card.querySelectorAll('a[href]'));
 
-        // Strategy A: Elements with role="article"
-        document.querySelectorAll('div[role="article"]').forEach(el => {
-            if (!seenElements.has(el)) {
-                seenElements.add(el);
-                candidateCards.push(el);
-            }
-        });
-
-        // Strategy B: Direct children of feed
-        document.querySelectorAll('div[role="feed"] > div').forEach(el => {
-            if (!seenElements.has(el) && (el.innerText || '').trim().length > 30) {
-                seenElements.add(el);
-                candidateCards.push(el);
-            }
-        });
-
-        // Strategy C: Ancestors of post links
-        document.querySelectorAll('a[href]').forEach(a => {
-            const href = a.getAttribute('href') || '';
-            if (isPostLink(href)) {
-                let parent = a.parentElement;
-                let depth = 0;
-                let chosen = null;
-                while (parent && depth < 12 && parent !== document.body) {
-                    if (parent.getAttribute('role') === 'article') {
-                        chosen = parent;
-                        break;
-                    }
-                    if (parent.parentElement && parent.parentElement.getAttribute('role') === 'feed') {
-                        chosen = parent;
-                        break;
-                    }
-                    const len = (parent.innerText || '').length;
-                    if (len > 40 && len < 8000 && !chosen) {
-                        chosen = parent;
-                    }
-                    parent = parent.parentElement;
-                    depth++;
-                }
-                if (chosen && !seenElements.has(chosen)) {
-                    seenElements.add(chosen);
-                    candidateCards.push(chosen);
-                }
-            }
-        });
-
-        // Strategy D: Fallback to main text blocks
-        if (candidateCards.length === 0) {
-            document.querySelectorAll('div[role="main"] div[dir="auto"]').forEach(el => {
-                let p = el.parentElement;
-                let depth = 0;
-                while (p && depth < 8 && p !== document.body) {
-                    const txt = (p.innerText || '').trim();
-                    if (txt.length > 50 && txt.length < 6000 && !seenElements.has(p)) {
-                        seenElements.add(p);
-                        candidateCards.push(p);
-                        break;
-                    }
-                    p = p.parentElement;
-                    depth++;
-                }
-            });
-        }
-
-        // 3. Extract properties from each candidate card
-        const results = [];
-        const seenUrls = new Set();
-
-        for (const card of candidateCards) {
-            if (results.length >= maxLimit) break;
-
-            const allLinks = Array.from(card.querySelectorAll('a[href]'));
-            let postUrl = '';
-            for (const a of allLinks) {
+            // Pass 1: Explicit post or permalink link
+            for (const a of links) {
                 const href = a.getAttribute('href') || a.href || '';
-                if (isPostLink(href)) {
-                    postUrl = cleanUrl(href);
-                    break;
+                if (!href || href.startsWith('#')) continue;
+                // Exclude author/user links, hashtags, member links
+                if (href.includes('/user/') || href.includes('/member') || href.includes('/hashtag/') || href.includes('/events/')) {
+                    continue;
+                }
+                if (href.includes('/posts/') || href.includes('/permalink/') || href.includes('story_fbid=')) {
+                    const cleaned = cleanPostUrl(href);
+                    if (cleaned) return cleaned;
                 }
             }
 
-            // Extract message content
+            // Pass 2: Timestamp anchor (has aria-label or relative time text)
+            for (const a of links) {
+                const href = a.getAttribute('href') || a.href || '';
+                if (!href || href.startsWith('#')) continue;
+                if (href.includes('/user/') || href.includes('/member') || href.includes('/hashtag/')) continue;
+
+                const label = (a.getAttribute('aria-label') || '').toLowerCase();
+                const text = (a.innerText || '').toLowerCase().trim();
+
+                const isTime = (
+                    label.includes('lúc') || label.includes('ngày') || label.includes('tháng') ||
+                    label.includes('hôm qua') || label.includes('phút') || label.includes('giờ') ||
+                    /\\d+\\s*(phút|giờ|ngày|tháng|min|hr|h|d)/.test(text) ||
+                    text.includes('hôm qua') || text.includes('vừa xong')
+                );
+
+                if (isTime) {
+                    const cleaned = cleanPostUrl(href);
+                    if (cleaned) return cleaned;
+                }
+            }
+
+            return '';
+        };
+
+        // Helper: Extract Author name
+        const extractAuthor = (card) => {
+            // Find links with profile or strong header
+            const candidates = card.querySelectorAll('h2 a, h3 a, h4 a, strong a, a[role="link"] strong, span[dir="auto"] strong, a[href*="/user/"]');
+            for (const el of candidates) {
+                const anchor = el.tagName === 'A' ? el : el.closest('a');
+                const text = (el.innerText || anchor?.innerText || '').trim();
+                const href = anchor ? (anchor.getAttribute('href') || '') : '';
+
+                if (!text || text.length > 50) continue;
+                const lower = text.toLowerCase();
+                if (lower.includes('nhóm') || lower.includes('tham gia') || lower.includes('xem')) continue;
+                if (href.includes('/groups/') && !href.includes('/user/') && !href.includes('/posts/')) continue;
+
+                return text;
+            }
+            return 'Facebook User';
+        };
+
+        // Helper: Extract timestamp
+        const extractTime = (card) => {
+            const timeEl = card.querySelector('time[datetime]');
+            if (timeEl) {
+                const dt = timeEl.getAttribute('datetime') || timeEl.innerText;
+                if (dt) return dt.trim();
+            }
+
+            const links = card.querySelectorAll('a[role="link"], a[href]');
+            for (const a of links) {
+                const label = a.getAttribute('aria-label') || '';
+                if (label && (label.includes('lúc') || label.includes('ngày') || label.includes('tháng') || label.includes('hôm qua') || label.includes('phút') || label.includes('giờ'))) {
+                    return label.trim();
+                }
+            }
+
+            for (const a of links) {
+                const text = (a.innerText || '').trim();
+                if (/\\d+\\s*(phút|giờ|ngày|tháng|min|hr|h|d)/.test(text) || text.includes('hôm qua') || text.includes('vừa xong')) {
+                    return text;
+                }
+            }
+            return '';
+        };
+
+        // Helper: Extract message content
+        const extractContent = (card) => {
             let content = '';
             const msgEls = card.querySelectorAll('div[data-ad-preview="message"], div[dir="auto"]');
             if (msgEls.length > 0) {
@@ -379,300 +417,232 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                         lower === 'bình luận' || lower === 'comment' ||
                         lower === 'chia sẻ' || lower === 'share' ||
                         lower.startsWith('viết bình luận') ||
-                        lower.startsWith('xem thêm bình luận')
+                        lower.startsWith('xem thêm bình luận') ||
+                        lower.startsWith('tác giả') ||
+                        lower.startsWith('quản trị viên')
                     );
                 });
                 content = filtered.join('\\n');
             }
+            return content;
+        };
 
+        // 2. Identify candidate post cards
+        const candidateCards = [];
+        const seenElements = new Set();
+
+        // Strategy 1: Feed direct children
+        document.querySelectorAll('div[role="feed"] > div, div[role="main"] div[role="article"]').forEach(el => {
+            if (!seenElements.has(el) && (el.innerText || '').trim().length > 30) {
+                seenElements.add(el);
+                candidateCards.push(el);
+            }
+        });
+
+        // Strategy 2: Ancestors of post links
+        if (candidateCards.length === 0) {
+            document.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"]').forEach(a => {
+                let p = a.parentElement;
+                let depth = 0;
+                let chosen = null;
+                while (p && depth < 12 && p !== document.body) {
+                    if (p.getAttribute('role') === 'article' || (p.parentElement && p.parentElement.getAttribute('role') === 'feed')) {
+                        chosen = p;
+                        break;
+                    }
+                    if ((p.innerText || '').length > 40 && !chosen) {
+                        chosen = p;
+                    }
+                    p = p.parentElement;
+                    depth++;
+                }
+                if (chosen && !seenElements.has(chosen)) {
+                    seenElements.add(chosen);
+                    candidateCards.push(chosen);
+                }
+            });
+        }
+
+        // 3. Extract posts
+        const results = [];
+        const seenUrls = new Set();
+
+        for (const card of candidateCards) {
+            if (results.length >= maxLimit) break;
+
+            const postUrl = findPostUrl(card);
+            // CRITICAL: Skip any post without a verified, accessible direct permalink!
+            if (!postUrl || seenUrls.has(postUrl)) {
+                continue;
+            }
+
+            const content = extractContent(card);
             if (!content || content.length < 15) {
                 continue;
             }
 
-            // Fallback unique URL if Facebook obfuscated direct link
-            if (!postUrl) {
-                let hash = 0;
-                for (let i = 0; i < content.length; i++) {
-                    hash = ((hash << 5) - hash) + content.charCodeAt(i);
-                    hash |= 0;
-                }
-                postUrl = window.location.href.split('?')[0] + '#post_' + Math.abs(hash);
-            }
-
-            if (seenUrls.has(postUrl)) {
-                continue;
-            }
             seenUrls.add(postUrl);
-
-            // Extract author
-            let author = 'Facebook User';
-            const heading = card.querySelector('h2 a, h3 a, h4 a, strong a, a[role="link"] strong, span[dir="auto"] strong');
-            if (heading && (heading.innerText || '').trim()) {
-                author = heading.innerText.trim();
-            } else {
-                for (const a of allLinks) {
-                    const txt = (a.innerText || '').trim();
-                    if (txt && txt.length > 1 && txt.length < 40 && !txt.toLowerCase().includes('xem') && !txt.toLowerCase().includes('thích')) {
-                        author = txt;
-                        break;
-                    }
-                }
-            }
-
-            // Extract time
-            let rawTime = '';
-            const timeEl = card.querySelector('time[datetime]');
-            if (timeEl) {
-                rawTime = timeEl.getAttribute('datetime') || '';
-            }
-            if (!rawTime) {
-                for (const a of allLinks) {
-                    const label = a.getAttribute('aria-label') || '';
-                    if (label && (label.includes('phút') || label.includes('giờ') || label.includes('ngày') || label.includes('tháng') || label.includes('hôm qua') || label.includes('min') || label.includes('hr'))) {
-                        rawTime = label;
-                        break;
-                    }
-                }
-            }
+            const author = extractAuthor(card);
+            const rawTime = extractTime(card);
 
             results.push({
                 post_url: postUrl,
                 author: author,
                 content: content,
-                raw_time: rawTime
+                raw_time: rawTime,
+                group_name: defaultGroupName
             });
         }
 
         return results;
         """
         try:
-            return driver.execute_script(js_script, limit) or []
+            return driver.execute_script(js_script, limit, group_name_fallback) or []
         except Exception as e:
-            logger.warning(f"Client JavaScript post extraction encountered error: {e}")
+            logger.error(f"JavaScript DOM extraction failed: {e}", exc_info=True)
             return []
 
-    def _search_via_ui(self, driver, keyword: str) -> None:
-        """Search via Facebook's top search input and switch to Posts tab."""
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.common.keys import Keys
-
-        logger.info(f"Using Facebook search bar to search for: '{keyword}'...")
-
-        search_selectors = [
-            "input[aria-label*='Tìm kiếm trên Facebook']",
-            "input[placeholder*='Tìm kiếm trên Facebook']",
-            "input[aria-label*='Search Facebook']",
-            "input[placeholder*='Search Facebook']",
-            "input[aria-label*='Tìm kiếm']",
-            "input[placeholder*='Tìm kiếm']",
-            "input[aria-label*='Search']",
-            "input[placeholder*='Search']",
-            "input[type='search']",
-            "input[role='combobox']",
-            "form input",
-        ]
-
-        search_input = None
-        for sel in search_selectors:
-            for el in driver.find_elements(By.CSS_SELECTOR, sel):
-                if el.is_displayed():
-                    search_input = el
-                    break
-            if search_input:
-                break
-
-        if not search_input:
-            icon_selectors = [
-                "div[aria-label*='Tìm kiếm']",
-                "div[aria-label*='Search']",
-                "a[aria-label*='Tìm kiếm']",
-                "a[aria-label*='Search']",
-                "svg[aria-label*='Tìm kiếm']",
-            ]
-            for sel in icon_selectors:
-                for icon in driver.find_elements(By.CSS_SELECTOR, sel):
-                    if icon.is_displayed():
-                        try:
-                            icon.click()
-                            time.sleep(1.5)
-                            break
-                        except Exception:
-                            pass
-                for sel_in in search_selectors:
-                    for el in driver.find_elements(By.CSS_SELECTOR, sel_in):
-                        if el.is_displayed():
-                            search_input = el
-                            break
-                    if search_input:
-                        break
-                if search_input:
-                    break
-
-        if search_input:
-            logger.info(f"Located search bar. Typing '{keyword}'...")
-            try:
-                search_input.click()
-                time.sleep(0.5)
-                search_input.send_keys(Keys.CONTROL + "a")
-                search_input.send_keys(Keys.BACKSPACE)
-                for ch in keyword:
-                    search_input.send_keys(ch)
-                    time.sleep(0.03)
-                time.sleep(1)
-                search_input.send_keys(Keys.RETURN)
-                logger.info("Pressed Enter. Waiting for search results to load...")
-                time.sleep(5)
-            except Exception as e:
-                logger.warning(f"Error typing into search input: {e}")
-                from urllib.parse import quote_plus
-                driver.get(f"https://www.facebook.com/search/posts/?q={quote_plus(keyword)}")
-                time.sleep(4)
-        else:
-            logger.warning("Search bar input not found via UI, navigating directly...")
-            from urllib.parse import quote_plus
-            driver.get(f"https://www.facebook.com/search/posts/?q={quote_plus(keyword)}")
-            time.sleep(4)
-
-        # Switch to 'Bài viết' (Posts) tab
+    def _get_page_group_name(self, driver, fallback_url: str) -> str:
+        """Extract group name from DOM or title."""
         try:
-            logger.info("Switching to 'Bài viết' (Posts) tab in search filters...")
-            tabs = driver.find_elements(
-                By.CSS_SELECTOR,
-                "a[href*='/search/posts/'], a[href*='/search/posts']"
-            )
-            clicked = False
-            for tab in tabs:
-                if tab.is_displayed():
-                    tab.click()
-                    clicked = True
-                    logger.info("Clicked 'Bài viết' (Posts) tab successfully.")
-                    time.sleep(3)
-                    break
-            if not clicked:
-                spans = driver.find_elements(
-                    By.XPATH,
-                    "//span[text()='Bài viết' or text()='Posts' or text()='Bài viết công khai']"
-                )
-                for s in spans:
-                    if s.is_displayed():
-                        s.click()
-                        logger.info("Clicked 'Bài viết' span filter.")
-                        time.sleep(3)
-                        break
-        except Exception as e:
-            logger.debug(f"Filter tab click non-fatal: {e}")
+            from selenium.webdriver.common.by import By
+            # Check h1 tag in group header
+            h1s = driver.find_elements(By.CSS_SELECTOR, "h1, div[role='main'] h1")
+            for h in h1s:
+                t = (h.text or "").strip()
+                if t and len(t) < 80 and not t.lower().startswith("kết quả"):
+                    return t
+            title = (driver.title or "").split("|")[0].replace("Facebook", "").strip()
+            if title and not title.lower().startswith("kết quả"):
+                return title
+        except Exception:
+            pass
+        return fallback_url
 
     def collect_posts(self, source_id: str, limit: int = 100) -> list[FacebookPost]:
-        """Search and extract Facebook posts matching source_id and keywords."""
+        """Navigate to Facebook Group(s), search by keyword, and extract posts."""
         from selenium.common.exceptions import TimeoutException
 
         target = (source_id or "").strip()
         if not target:
-            raise ValueError("A non-empty search keyword or source URL is required.")
+            raise ValueError("Group URL or ID is required for Selenium group search.")
 
-        group_url = None
+        # Parse group and keyword
+        group_raw = None
         keyword = None
         if "||" in target:
-            group_url, keyword = target.split("||", 1)
-        elif target.startswith("http://") or target.startswith("https://") or "facebook.com" in target:
-            group_url = target
+            group_raw, keyword = target.split("||", 1)
+        elif target.startswith("http://") or target.startswith("https://") or "facebook.com" in target or target.isdigit():
+            group_raw = target
+            keyword = "tìm gia sư"
         else:
+            group_raw = None
             keyword = target
 
-        search_keyword = keyword or "tìm gia sư"
+        settings = get_settings()
+        final_group_raw = group_raw or settings.facebook_group_url or settings.facebook_source_id
+        if not final_group_raw:
+            raise ValueError(
+                "Chưa cấu hình nhóm Facebook! Vui lòng cung cấp link nhóm qua tham số --group <URL_NHÓM> "
+                "hoặc đặt FACEBOOK_GROUP_URL trong file .env."
+            )
 
-        logger.info("Initializing Chrome WebDriver with isolated profile...")
+        search_keyword = (keyword or "tìm gia sư").strip()
+        # Support multiple groups separated by comma
+        group_urls = [normalize_group_url(g) for g in final_group_raw.split(",") if g.strip()]
+
+        logger.info(f"Initializing Chrome WebDriver (Profile: '{self.profile_name}')...")
         driver = self._driver or self._build_driver()
+        posts: list[FacebookPost] = []
+        seen_all_urls: set[str] = set()
+
         try:
             logger.info("Opening Facebook homepage to verify session...")
-            driver.get("https://www.facebook.com")
-        except TimeoutException:
-            logger.warning("Facebook warm-up page timed out; continuing with current session.")
-            driver.execute_script("window.stop();")
-        time.sleep(4)
+            try:
+                driver.get("https://www.facebook.com")
+            except TimeoutException:
+                driver.execute_script("window.stop();")
+            time.sleep(3.5)
 
-        posts: list[FacebookPost] = []
-        try:
             if not self._has_logged_in_session(driver):
-                warning = (
-                    "Facebook is not logged in. Please log in manually in the opened Chrome window."
-                )
+                warning = "Facebook is not logged in. Please log in manually in the opened Chrome window."
                 logger.warning(warning)
                 print(warning)
                 input(
                     ">>> ACTION REQUIRED: Please log in to Facebook on the opened Chrome window. "
-                    "After you successfully log in and see the newsfeed, come back here and press ENTER to continue..."
+                    "After you successfully log in, press ENTER to continue..."
                 )
                 try:
                     driver.get("https://www.facebook.com")
                 except TimeoutException:
-                    logger.warning("Facebook refresh timed out; continuing with current session.")
                     driver.execute_script("window.stop();")
 
-            if group_url:
-                logger.info(f"Navigating to group page: {group_url}")
-                try:
-                    driver.get(group_url)
-                    time.sleep(4)
-                except TimeoutException:
-                    driver.execute_script("window.stop();")
-                # Perform search inside group or on Facebook
-                self._search_via_ui(driver, search_keyword)
-            else:
-                # Search directly via top search bar on Facebook homepage
-                self._search_via_ui(driver, search_keyword)
-
-            time.sleep(random.uniform(*self.sleep_range))
-
-            # Smart multi-container scrolling
-            scroll_count = max(self.scrolls, 6)
-            logger.info(f"Scrolling {scroll_count} times to load dynamic feed content...")
-            for scroll_idx in range(scroll_count):
-                scroll_script = """
-                window.scrollTo(0, document.body.scrollHeight);
-                if (document.scrollingElement) {
-                    document.scrollingElement.scrollTop = document.scrollingElement.scrollHeight;
-                }
-                document.querySelectorAll('div[role="feed"], div[role="main"]').forEach(el => {
-                    el.scrollTop = el.scrollHeight;
-                });
-                """
-                driver.execute_script(scroll_script)
-                logger.info(f"Scroll {scroll_idx + 1}/{scroll_count} completed. Waiting for posts...")
-                time.sleep(random.uniform(*self.sleep_range))
-
-            logger.info("Extracting candidate posts from rendered DOM...")
-            raw_posts = self._extract_posts_js(driver, limit=limit)
-            logger.info(f"JavaScript post extractor retrieved {len(raw_posts)} candidate post(s).")
-
-            seen_urls: set[str] = set()
-            for item in raw_posts:
+            for group_url in group_urls:
                 if len(posts) >= limit:
                     break
-                content = (item.get("content") or "").strip()
-                post_url = item.get("post_url") or ""
-                author = item.get("author") or "Facebook User"
-                raw_time = item.get("raw_time") or ""
 
-                if not content or post_url in seen_urls:
-                    continue
-                seen_urls.add(post_url)
+                search_url = build_group_search_url(group_url, search_keyword)
+                logger.info(f"Navigating to Group Search URL: {search_url}")
 
-                post_id = hashlib.sha1(post_url.encode("utf-8")).hexdigest()
-                posts.append(
-                    FacebookPost(
-                        post_id=post_id,
-                        group_name="Facebook Search" if not group_url else group_url,
-                        content=content,
-                        author=author,
-                        post_time=self._parse_time(raw_time),
-                        post_url=post_url,
+                try:
+                    driver.get(search_url)
+                    time.sleep(4.0)
+                except TimeoutException:
+                    logger.warning(f"Timeout opening {search_url}; attempting to continue with rendered DOM.")
+                    driver.execute_script("window.stop();")
+
+                group_display_name = self._get_page_group_name(driver, group_url)
+                logger.info(f"Searching inside group '{group_display_name}' for keyword: '{search_keyword}'")
+
+                # Dynamic scrolling to load feed results
+                scroll_count = max(self.scrolls, 5)
+                logger.info(f"Scrolling {scroll_count} times to load dynamic feed content...")
+                for scroll_idx in range(scroll_count):
+                    scroll_script = """
+                    window.scrollTo(0, document.body.scrollHeight);
+                    if (document.scrollingElement) {
+                        document.scrollingElement.scrollTop = document.scrollingElement.scrollHeight;
+                    }
+                    document.querySelectorAll('div[role="feed"], div[role="main"]').forEach(el => {
+                        el.scrollTop = el.scrollHeight;
+                    });
+                    """
+                    driver.execute_script(scroll_script)
+                    logger.info(f"Scroll {scroll_idx + 1}/{scroll_count} completed.")
+                    time.sleep(random.uniform(*self.sleep_range))
+
+                logger.info("Extracting verified post links and content from rendered DOM...")
+                raw_posts = self._extract_posts_js(driver, group_name_fallback=group_display_name, limit=limit)
+                logger.info(f"Retrieved {len(raw_posts)} valid post(s) with confirmed permalinks from this group.")
+
+                for item in raw_posts:
+                    if len(posts) >= limit:
+                        break
+                    post_url = item.get("post_url") or ""
+                    content = (item.get("content") or "").strip()
+                    author = item.get("author") or "Facebook User"
+                    raw_time = item.get("raw_time") or ""
+                    grp_name = item.get("group_name") or group_display_name
+
+                    if not post_url or not content or post_url in seen_all_urls:
+                        continue
+                    seen_all_urls.add(post_url)
+
+                    post_id = hashlib.sha1(post_url.encode("utf-8")).hexdigest()
+                    posts.append(
+                        FacebookPost(
+                            post_id=post_id,
+                            group_name=grp_name,
+                            content=content,
+                            author=author,
+                            post_time=self._parse_time(raw_time),
+                            post_url=post_url,
+                        )
                     )
-                )
 
         finally:
             if self._owns_driver:
                 driver.quit()
 
-        logger.info(f"Collected {len(posts)} post(s) from Facebook.")
+        logger.info(f"Collected total of {len(posts)} verified post(s) from Facebook Groups.")
         return posts

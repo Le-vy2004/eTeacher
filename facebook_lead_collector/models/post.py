@@ -48,13 +48,21 @@ class Lead(BaseModel):
     )
 
     def to_sheet_row(self) -> list[str]:
-        """Format lead as a row for Google Sheets."""
+        """Format lead as a row for Google Sheets matching user column requirements:
+        Link, Tên người đăng, Thời gian, Nội dung bài đăng, Nhóm, Từ khóa, Thời gian thu thập.
+        """
+        post_time_formatted = (
+            self.post_time.strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(self.post_time, datetime)
+            else str(self.post_time)
+        )
         return [
+            self.post_url,
+            self.author,
+            post_time_formatted,
+            self.content,
             self.group_name,
             self.keyword,
-            self.author,
-            self.post_time.strftime("%Y-%m-%d %H:%M:%S"),
-            self.post_url,
             self.collected_at.strftime("%Y-%m-%d %H:%M:%S"),
-            self.content,
         ]
+

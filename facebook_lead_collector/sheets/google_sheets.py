@@ -20,13 +20,13 @@ SHEET_SCOPES = [
 ]
 
 SHEET_HEADERS = [
-    "Group",
-    "Keyword",
-    "Author",
-    "Post Time",
-    "Post URL",
-    "Collected At",
-    "Content",
+    "Link bài viết",
+    "Tên người đăng",
+    "Thời gian",
+    "Nội dung bài đăng",
+    "Nhóm",
+    "Từ khóa",
+    "Thời gian thu thập",
 ]
 
 
@@ -110,18 +110,16 @@ class GoogleSheetsClient:
                         title=self.worksheet_name, rows="1000", cols="10"
                     )
 
-            # Check and initialize headers if empty
+            # Check and initialize headers if empty or outdated
             headers = self.worksheet.row_values(1)
             if not headers:
                 logger.info("Sheet header is empty. Initializing column headers...")
-                self.worksheet.append_row(SHEET_HEADERS)
+                self.worksheet.update([SHEET_HEADERS], "A1:G1")
             elif headers != SHEET_HEADERS:
-                logger.warning(
-                    f"Worksheet headers differ from expected format.\n"
-                    f"Found: {headers}\nExpected: {SHEET_HEADERS}"
-                )
+                logger.info("Updating worksheet headers to match required column structure...")
+                self.worksheet.update([SHEET_HEADERS], "A1:G1")
 
-            # Pre-cache existing post URLs from column 5 to prevent duplicate writes
+            # Pre-cache existing post URLs to prevent duplicate writes
             self._load_existing_urls()
 
             self.is_connected = True
@@ -137,14 +135,20 @@ class GoogleSheetsClient:
             return False
 
     def _load_existing_urls(self) -> None:
-        """Cache existing post URLs from column 5 (Post URL)."""
+        """Cache existing post URLs from sheet to prevent duplicate rows."""
         self._known_urls.clear()
         if not self.worksheet:
             return
 
         try:
-            # Column 5 is 'Post URL'
-            col_values = self.worksheet.col_values(5)
+            url_col_idx = 1
+            headers = self.worksheet.row_values(1)
+            if "Link bài viết" in headers:
+                url_col_idx = headers.index("Link bài viết") + 1
+            elif "Post URL" in headers:
+                url_col_idx = headers.index("Post URL") + 1
+
+            col_values = self.worksheet.col_values(url_col_idx)
             # Skip row 1 (header)
             urls = [url.strip() for url in col_values[1:] if url and url.strip()]
             self._known_urls.update(urls)
