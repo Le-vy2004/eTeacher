@@ -22,7 +22,6 @@ DEFAULT_KEYWORDS: list[str] = [
     "dạy kèm",
     "tìm người dạy kèm",
     "cần người dạy kèm",
-    "nhận lớp dạy kèm",
     "gia sư toán",
     "gia sư tiếng anh",
     "gia sư lý",
@@ -48,8 +47,61 @@ DEFAULT_KEYWORDS: list[str] = [
     "cần gia sư tphcm",
 ]
 
-# Từ khóa loại trừ (Spam / Bài tuyển dụng bán hàng, phục vụ, việc làm khác)
-NEGATIVE_KEYWORDS: list[str] = [
+# Từ khóa gia sư tự ứng tuyển / chào mời nhận lớp (Supply Leads - Phải loại bỏ)
+TUTOR_SUPPLY_KEYWORDS: list[str] = [
+    "nhận gia sư",
+    "nhận dạy kèm",
+    "nhận dạy 1-1",
+    "nhận dạy các môn",
+    "nhận dạy tại nhà",
+    "nhận dạy online",
+    "em nhận dạy",
+    "mình nhận dạy",
+    "cô nhận dạy",
+    "thầy nhận dạy",
+    "bên em nhận",
+    "bên mình nhận",
+    "cháu nhận dạy",
+    "muốn nhận dạy",
+    "muốn nhận kèm",
+    "muốn nhận dạy kèm",
+    "dạ hiện con nhận",
+    "đang là sinh viên",
+    "hiện là sinh viên",
+    "hiện tại đang là sinh viên",
+    "sinh viên năm",
+    "đang học đại học",
+    "sinh viên nhận",
+    "giáo viên nhận",
+    "góc tìm học sinh",
+    "góc tìm kiếm học sinh",
+    "trống các buổi",
+    "trống lịch",
+    "rảnh lịch",
+    "rảnh các buổi",
+    "rảnh các tối",
+    "rảnh tối",
+    "trình độ học vấn",
+    "thành tích học tập",
+    "profile gia sư",
+    "cv gia sư",
+    "em có kinh nghiệm",
+    "mình có kinh nghiệm",
+    "phụ huynh nào cần",
+    "phụ huynh/học sinh nào cần",
+    "học sinh nào cần",
+    "ai cần gia sư",
+    "bạn nào cần gia sư",
+    "anh/chị nào cần gia sư",
+    "lớp học online 1 kèm 1",
+    "em nhận gia sư",
+    "mình nhận gia sư",
+    "các bạn gia sư",
+    "kèm riêng theo",
+]
+
+# Từ khóa rác / Tuyển dụng ngành khác
+SPAM_NEGATIVE_KEYWORDS: list[str] = [
     "tuyển nhân viên",
     "bán quần áo",
     "bán hàng",
@@ -64,13 +116,46 @@ NEGATIVE_KEYWORDS: list[str] = [
     "nhân viên phục vụ",
     "giao hàng",
     "tuyển telesale",
+    "nhóm công khai",
+    "thành viên",
+    "chỉ báo trạng thái online",
+    "đang hoạt động",
 ]
+
+NEGATIVE_KEYWORDS: list[str] = TUTOR_SUPPLY_KEYWORDS + SPAM_NEGATIVE_KEYWORDS
+
+# Từ khóa thể hiện nhu cầu tìm gia sư từ phía Phụ huynh / Học sinh (Demand Intent)
+EXPLICIT_DEMAND_KEYWORDS: list[str] = [
+    "tìm gia sư",
+    "cần gia sư",
+    "tuyển gia sư",
+    "cần tìm gia sư",
+    "tìm giáo viên",
+    "cần giáo viên",
+    "tuyển giáo viên",
+    "tìm người dạy kèm",
+    "cần người dạy kèm",
+    "tìm dạy kèm",
+    "cần dạy kèm",
+    "tìm gia sư tphcm",
+    "tìm gia sư hà nội",
+    "cần gia sư tphcm",
+    "cần gia sư hà nội",
+    "gia sư cho bé",
+    "gia sư cho con",
+    "cần sinh viên dạy",
+    "tìm sinh viên dạy",
+]
+
 
 def find_matching_keywords(
     text: str | None,
     keywords: list[str] | None = None,
 ) -> list[str]:
-    """Find all matching keywords in post content with negative keyword filtering.
+    """Find all matching keywords in post content with strict demand filtering.
+
+    Filters out tutor self-promotion, advertisements, and spam posts unconditionally.
+    Requires clear demand intent (parent or student looking for a tutor).
 
     Args:
         text: Post content to analyze.
@@ -87,11 +172,19 @@ def find_matching_keywords(
     if not cleaned_text:
         return []
 
-    # Check negative keywords first (Loại bỏ các bài tuyển dụng bán quần áo, tạp vụ...)
-    has_tutor_intent = any(core in cleaned_text for core in ["gia sư", "dạy kèm", "lớp dạy", "tìm giáo viên", "cần giáo viên"])
+    # 1. Reject negative keywords unconditionally (gia sư tự quảng cáo, bài rác)
     for neg_kw in NEGATIVE_KEYWORDS:
-        if neg_kw in cleaned_text and not has_tutor_intent:
+        if neg_kw in cleaned_text:
             return []
+
+    # 2. Demand intent check: Must express seeking a tutor (tìm / cần / tuyển / cho bé / cho con)
+    has_demand_intent = any(dk in cleaned_text for dk in EXPLICIT_DEMAND_KEYWORDS) or (
+        any(verb in cleaned_text for verb in ["tìm", "cần", "tuyển", "cho bé", "cho con", "cho cháu", "cho em"])
+        and any(core in cleaned_text for core in ["gia sư", "dạy kèm", "dạy toán", "dạy tiếng anh", "dạy lý", "dạy hóa", "dạy văn"])
+    )
+
+    if not has_demand_intent:
+        return []
 
     target_keywords = keywords if keywords is not None else DEFAULT_KEYWORDS
 
@@ -123,8 +216,12 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    test_text = "TUYỂN NHÂN VIÊN NỮ BÁN QUẦN ÁO tại Tân Phú TP.HCM"
-    print("Test tuyển bán quần áo:", find_matching_keywords(test_text))
-    
-    tutor_text = "Cần tìm gia sư dạy tiếng anh tại nhà cho bé khu vực kim chung đông anh"
-    print("Test bài gia sư thật:", find_matching_keywords(tutor_text))
+    test_spam = "TUYỂN NHÂN VIÊN NỮ BÁN QUẦN ÁO tại Tân Phú TP.HCM"
+    print("Test tuyển bán quần áo (loại bỏ):", find_matching_keywords(test_spam))
+
+    test_tutor_ad = "Cháu/em/mình hiện tại đang là sinh viên Đại học Bách Khoa, đang nhận gia sư các môn KHTN..."
+    print("Test bài gia sư tự ứng tuyển (loại bỏ):", find_matching_keywords(test_tutor_ad))
+
+    test_real_parent = "Cần tìm gia sư dạy tiếng anh tại nhà cho bé khu vực kim chung đông anh"
+    print("Test bài phụ huynh thật (giữ lại):", find_matching_keywords(test_real_parent))
+

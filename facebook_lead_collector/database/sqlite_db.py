@@ -234,22 +234,4 @@ def get_sources_from_db(db_path: str | Path | None = None) -> list[str]:
     return results
 
 
-if __name__ == "__main__":
-    if sys.platform == "win32":
-        try:
-            sys.stdout.reconfigure(encoding="utf-8")
-        except Exception:
-            pass
 
-    print("\n--- Kiểm Tra Cơ Sở Dữ Liệu SQLite ---")
-    settings = get_settings()
-    db_path = settings.resolved_database_path
-    print(f"Đường dẫn database: {db_path}")
-    init_db(db_path)
-    leads = get_all_leads(db_path)
-    print(f"Tổng số leads đang lưu trữ: {len(leads)}")
-    for idx, item in enumerate(leads[:5], 1):
-        print(f"  {idx}. [{item.post_time.strftime('%Y-%m-%d %H:%M')}] {item.author} | {item.keyword} | {item.post_url}")
-    if len(leads) > 5:
-        print(f"  ... và {len(leads) - 5} leads khác.")
-    print()

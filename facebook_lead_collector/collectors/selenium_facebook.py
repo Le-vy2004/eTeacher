@@ -143,21 +143,12 @@ class SeleniumFacebookSearchCollector(BaseCollector):
 
     @staticmethod
     def _parse_time(raw_time: str) -> datetime:
+        if not raw_time:
+            return datetime.now()
         try:
             return datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
         except (TypeError, ValueError):
             return datetime.now()
-
-    @staticmethod
-    def _post_url(article) -> str | None:
-        from selenium.webdriver.common.by import By
-
-        links = article.find_elements(By.CSS_SELECTOR, "a[href]")
-        for link in links:
-            href = link.get_attribute("href") or ""
-            if "/posts/" in href or "story_fbid=" in href or "/permalink/" in href:
-                return href.split("?")[0]
-        return None
 
     @staticmethod
     def _clean_post_url(raw_url: str) -> str:
@@ -165,29 +156,33 @@ class SeleniumFacebookSearchCollector(BaseCollector):
         if not raw_url:
             return ""
         try:
+            import re
             import urllib.parse
             parsed = urllib.parse.urlparse(raw_url)
             path = parsed.path.rstrip("/")
-            if "/posts/" in path or "/permalink/" in path:
-                return f"https://www.facebook.com{path}"
-            
+            if "/posts/" in path:
+                base, post_id = path.rsplit("/posts/", 1)
+                clean_id = post_id.split("/")[0].split(",")[0]
+                return f"https://www.facebook.com{base}/posts/{clean_id}/"
+            if "/permalink/" in path:
+                base, perm_id = path.rsplit("/permalink/", 1)
+                clean_id = perm_id.split("/")[0].split(",")[0]
+                return f"https://www.facebook.com{base}/permalink/{clean_id}/"
+
             qs = urllib.parse.parse_qs(parsed.query)
+            if "multi_permalinks" in qs and qs["multi_permalinks"]:
+                pid = qs["multi_permalinks"][0].split(",")[0]
+                group_match = re.search(r"/groups/([^/]+)", path)
+                if group_match and pid:
+                    return f"https://www.facebook.com/groups/{group_match.group(1)}/posts/{pid}/"
+
             important_keys = ["story_fbid", "id", "fbid", "set"]
-            clean_qs = {k: qs[k][0] for k in important_keys if k in qs and qs[k]}
+            clean_qs = {k: qs[k][0].split(",")[0] for k in important_keys if k in qs and qs[k]}
             if clean_qs:
                 return f"https://www.facebook.com{path}?{urllib.parse.urlencode(clean_qs)}"
             return f"https://www.facebook.com{path}"
         except Exception:
-            return raw_url.split("?")[0]
-
-    @staticmethod
-    def _parse_time(raw_time: str) -> datetime:
-        if not raw_time:
-            return datetime.now()
-        try:
-            return datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return datetime.now()
+            return raw_url.split("?")[0].split(",")[0]
 
     @staticmethod
     def _has_logged_in_session(driver) -> bool:
@@ -250,8 +245,23 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                 const u = new URL(raw, window.location.origin);
                 const path = u.pathname.replace(/\/+$/, '');
 
+                if (path.includes('/posts/') || path.includes('/permalink/')) {
+                    let cleanPath = path;
+                    if (cleanPath.includes('/posts/')) {
+                        const parts = cleanPath.split('/posts/');
+                        const pid = parts[1].split('/')[0].split(',')[0];
+                        cleanPath = parts[0] + '/posts/' + pid;
+                    } else if (cleanPath.includes('/permalink/')) {
+                        const parts = cleanPath.split('/permalink/');
+                        const pid = parts[1].split('/')[0].split(',')[0];
+                        cleanPath = parts[0] + '/permalink/' + pid;
+                    }
+                    return u.origin + cleanPath + '/';
+                }
+
                 if (u.searchParams.has('multi_permalinks')) {
-                    const pid = u.searchParams.get('multi_permalinks');
+                    const rawPid = u.searchParams.get('multi_permalinks') || '';
+                    const pid = rawPid.split(',')[0].trim();
                     const groupMatch = path.match(/\/groups\/([^\/]+)/);
                     const gid = groupMatch ? groupMatch[1] : '';
                     if (gid && pid) {
@@ -260,17 +270,14 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                 }
 
                 if (u.searchParams.has('story_fbid')) {
-                    const fbid = u.searchParams.get('story_fbid');
+                    const rawFbid = u.searchParams.get('story_fbid') || '';
+                    const fbid = rawFbid.split(',')[0].trim();
                     const groupMatch = path.match(/\/groups\/([^\/]+)/);
                     if (groupMatch) {
                         return `https://www.facebook.com/groups/${groupMatch[1]}/posts/${fbid}/`;
                     }
                     const id = u.searchParams.get('id') || '';
                     return u.origin + path + '?story_fbid=' + fbid + (id ? '&id=' + id : '');
-                }
-
-                if (path.includes('/posts/') || path.includes('/permalink/')) {
-                    return u.origin + path + '/';
                 }
 
                 if (path.includes('/groups/') && path.includes('/user/')) {
@@ -669,7 +676,7 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                 if len(posts) >= limit:
                     break
                 content = (item.get("content") or "").strip()
-                post_url = item.get("post_url") or ""
+                post_url = self._clean_post_url(item.get("post_url") or "")
                 author = item.get("author") or "Facebook User"
                 raw_time = item.get("raw_time") or ""
 
