@@ -184,7 +184,28 @@ DATABASE_PATH=data/leads.db
 # Collector Configuration
 COLLECTOR_LIMIT=100
 LOG_LEVEL=INFO
+
 ```
+
+### Bước 5.1: Tìm kiếm bài viết bằng Chrome profile có sẵn
+
+Chế độ Selenium không nhận username/password. Chrome phải được đăng nhập thủ công
+trước bằng tài khoản được phép truy cập dữ liệu. Đóng toàn bộ cửa sổ Chrome đang dùng
+profile đó trước khi chạy để tránh lỗi khóa profile.
+
+Ứng dụng tự tìm thư mục Chrome mặc định và profile được Chrome sử dụng gần đây từ
+`Local State`, không cần đặt `CHROME_USER_DATA` hoặc `PROFILE_NAME` trong `.env`.
+Sau đó chạy tìm kiếm tuần tự một tài khoản:
+
+```powershell
+python main.py --selenium --keyword "tìm gia sư" --limit 50
+```
+
+Collector mở `https://www.facebook.com/search/posts/?q=...`, chờ ngẫu nhiên 4--7 giây,
+cuộn 3 lần và lấy Author, Time, Post URL cùng nội dung nội bộ để dùng bộ lọc tiếng Việt.
+URL được kiểm tra trùng trong SQLite trước khi tạo Lead và đồng bộ sang Google Sheets.
+Chỉ sử dụng với dữ liệu công khai hoặc dữ liệu mà tài khoản hiện tại được cấp quyền;
+không dùng để vượt CAPTCHA, checkpoint hoặc giới hạn truy cập của Facebook.
 
 ### Bước 6: Cấu hình Google Service Account
 

@@ -16,8 +16,9 @@ if sys.platform == "win32":
 from collectors.base import BaseCollector
 from collectors.facebook import FacebookCollector
 from collectors.mock import MockFacebookCollector
+from collectors.selenium_facebook import SeleniumFacebookSearchCollector
 from config import get_settings
-from database.sqlite_db import init_db, insert_lead, lead_exists
+from database.sqlite_db import get_all_leads, init_db, insert_lead, lead_exists
 from filters.keyword_filter import find_matching_keywords
 from models.post import FacebookPost, Lead
 from pydantic import BaseModel, Field
@@ -87,6 +88,7 @@ def process_posts(
                 author=post.author,
                 post_time=post.post_time,
                 post_url=post.post_url,
+                content=content,
                 collected_at=datetime.now(),
             )
 
@@ -121,6 +123,9 @@ def run(
     db_path: Path | str | None = None,
     enable_sheets: bool = True,
     token: str | None = None,
+    selenium: bool = False,
+    keyword: str | None = None,
+    profile: str | None = None,
 ) -> PipelineStats:
     """Execute the full lead collection pipeline once.
 
@@ -137,7 +142,17 @@ def run(
     """
     settings = get_settings()
     actual_limit = limit or settings.collector_limit
-    effective_source_id = source_id or settings.facebook_source_id or "default_source"
+    if selenium:
+        if not keyword and not source_id:
+            raise ValueError("--keyword (hoặc --source) is required when using --selenium.")
+        if source_id and keyword:
+            effective_source_id = f"{source_id}||{keyword}"
+        elif source_id:
+            effective_source_id = source_id
+        else:
+            effective_source_id = keyword
+    else:
+        effective_source_id = source_id or settings.facebook_source_id or "default_source"
 
     logger.info("Starting collector")
 
@@ -155,7 +170,13 @@ def run(
     if enable_sheets:
         sheets_client = GoogleSheetsClient()
         if settings.has_google_credentials:
-            sheets_client.connect()
+            if sheets_client.connect():
+                # Auto-sync existing leads in SQLite to Google Sheets
+                existing_db_leads = get_all_leads(db_path=resolved_db)
+                if existing_db_leads:
+                    synced = sheets_client.append_leads(list(reversed(existing_db_leads)))
+                    if synced > 0:
+                        logger.info(f"Synchronized {synced} existing leads from database to Google Sheets.")
         else:
             if not mock:
                 logger.warning(
@@ -167,6 +188,8 @@ def run(
     collector: BaseCollector
     if mock:
         collector = MockFacebookCollector()
+    elif selenium:
+        collector = SeleniumFacebookSearchCollector(profile_name=profile)
     else:
         active_token = token or settings.facebook_access_token
         if not active_token:
@@ -234,6 +257,23 @@ def parse_args() -> argparse.Namespace:
         help="Run in mock mode with simulated data (no Facebook/Google credentials required)",
     )
     parser.add_argument(
+        "--selenium",
+        action="store_true",
+        help="Search Facebook posts with the existing local Chrome profile.",
+    )
+    parser.add_argument(
+        "--keyword",
+        type=str,
+        default=None,
+        help="Keyword for --selenium, for example: 'tìm gia sư'.",
+    )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        help="Chrome profile name, for example: 'Profile 7' or '7'.",
+    )
+    parser.add_argument(
         "--source",
         type=str,
         default=None,
@@ -295,6 +335,9 @@ def main() -> None:
                         limit=args.limit,
                         db_path=args.db_path,
                         token=args.token,
+                        selenium=args.selenium,
+                        keyword=args.keyword,
+                        profile=args.profile,
                     )
                     print_cli_summary(stats)
                 except Exception as e:
@@ -315,6 +358,9 @@ def main() -> None:
                 limit=args.limit,
                 db_path=args.db_path,
                 token=args.token,
+                selenium=args.selenium,
+                keyword=args.keyword,
+                profile=args.profile,
             )
             print_cli_summary(stats)
         except ValueError as e:

@@ -1,4 +1,6 @@
 """Google Sheets integration client for Facebook Lead Collector."""
+from __future__ import annotations
+
 from pathlib import Path
 import sys
 from typing import Any
@@ -7,9 +9,6 @@ from typing import Any
 _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
-
-import gspread
-from google.oauth2.service_account import Credentials
 
 from config import get_settings
 from models.post import Lead
@@ -27,6 +26,7 @@ SHEET_HEADERS = [
     "Post Time",
     "Post URL",
     "Collected At",
+    "Content",
 ]
 
 
@@ -69,6 +69,9 @@ class GoogleSheetsClient:
             return False
 
         try:
+            import gspread
+            from google.oauth2.service_account import Credentials
+
             logger.info("Connecting to Google Sheets API...")
             credentials = Credentials.from_service_account_file(
                 str(self.credentials_path),
@@ -92,12 +95,20 @@ class GoogleSheetsClient:
             try:
                 self.worksheet = self.spreadsheet.worksheet(self.worksheet_name)
             except gspread.WorksheetNotFound:
-                logger.info(
-                    f"Worksheet '{self.worksheet_name}' not found. Creating it..."
-                )
-                self.worksheet = self.spreadsheet.add_worksheet(
-                    title=self.worksheet_name, rows="1000", cols="10"
-                )
+                worksheets = self.spreadsheet.worksheets()
+                if len(worksheets) == 1 and not worksheets[0].row_values(1):
+                    self.worksheet = worksheets[0]
+                    try:
+                        self.worksheet.update_title(self.worksheet_name)
+                    except Exception:
+                        pass
+                else:
+                    logger.info(
+                        f"Worksheet '{self.worksheet_name}' not found. Creating it..."
+                    )
+                    self.worksheet = self.spreadsheet.add_worksheet(
+                        title=self.worksheet_name, rows="1000", cols="10"
+                    )
 
             # Check and initialize headers if empty
             headers = self.worksheet.row_values(1)
@@ -180,6 +191,37 @@ class GoogleSheetsClient:
         except Exception as e:
             logger.error(f"Error appending lead to Google Sheets ({lead.post_url}): {e}")
             return False
+
+    def append_leads(self, leads: list[Lead]) -> int:
+        """Append multiple leads in batch to Google Sheets.
+
+        Args:
+            leads: List of Lead instances to append.
+
+        Returns:
+            Number of newly appended leads.
+        """
+        if not self.is_connected or not self.worksheet:
+            logger.debug("Google Sheets client is not connected; skipping batch append.")
+            return 0
+
+        rows_to_append = []
+        for lead in leads:
+            if not self.post_exists(lead.post_url):
+                rows_to_append.append(lead.to_sheet_row())
+                self._known_urls.add(lead.post_url.strip())
+
+        if not rows_to_append:
+            return 0
+
+        try:
+            self.worksheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
+            logger.info(f"Appended {len(rows_to_append)} leads to Google Sheets.")
+            return len(rows_to_append)
+        except Exception as e:
+            logger.error(f"Error appending batch of leads to Google Sheets: {e}")
+            return 0
+
 
 
 if __name__ == "__main__":

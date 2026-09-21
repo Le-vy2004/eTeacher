@@ -1,5 +1,6 @@
 """Configuration management using python-dotenv and Pydantic."""
 from functools import lru_cache
+import json
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -7,6 +8,28 @@ from pydantic import BaseModel, Field
 
 # Base directory for the project
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def _default_chrome_user_data() -> str:
+    """Return the standard Chrome user-data directory on the current OS."""
+    if os.name == "nt":
+        local_app_data = os.getenv("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        return str(Path(local_app_data) / "Google" / "Chrome" / "User Data")
+    return str(Path.home() / ".config" / "google-chrome")
+
+
+def _default_chrome_profile() -> str:
+    """Use Chrome's last selected profile when its Local State is available."""
+    user_data = Path(_default_chrome_user_data())
+    local_state = user_data / "Local State"
+    try:
+        with local_state.open("r", encoding="utf-8") as file:
+            profile = json.load(file).get("profile", {}).get("last_used")
+            if profile:
+                return str(profile)
+    except (OSError, ValueError, TypeError):
+        pass
+    return "Default"
 
 # Load .env if present
 load_dotenv(dotenv_path=BASE_DIR / ".env")
@@ -52,6 +75,18 @@ class Settings(BaseModel):
     )
     log_level: str = Field(
         default_factory=lambda: os.getenv("LOG_LEVEL", "INFO").upper()
+    )
+
+    # Selenium local Chrome profile
+    chrome_user_data: str = Field(
+        default_factory=lambda: os.getenv(
+            "CHROME_USER_DATA", _default_chrome_user_data()
+        ).strip()
+    )
+    chrome_profile_name: str = Field(
+        default_factory=lambda: os.getenv(
+            "PROFILE_NAME", _default_chrome_profile()
+        ).strip()
     )
 
     @property

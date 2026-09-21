@@ -32,6 +32,7 @@ class Lead(BaseModel):
         author: Author of the post.
         post_time: Publication timestamp of the post.
         post_url: Unique URL to the post.
+        content: Text content of the post.
         collected_at: Timestamp when lead was captured by this system.
     """
 
@@ -40,6 +41,7 @@ class Lead(BaseModel):
     author: str = Field(default="Unknown", description="Author of the post")
     post_time: datetime = Field(..., description="Time post was created")
     post_url: str = Field(..., description="Canonical URL to the post")
+    content: str = Field(default="", description="Full text content of the post")
     collected_at: datetime = Field(
         default_factory=datetime.now,
         description="Timestamp when lead was collected",
@@ -54,4 +56,5 @@ class Lead(BaseModel):
             self.post_time.strftime("%Y-%m-%d %H:%M:%S"),
             self.post_url,
             self.collected_at.strftime("%Y-%m-%d %H:%M:%S"),
+            self.content,
         ]

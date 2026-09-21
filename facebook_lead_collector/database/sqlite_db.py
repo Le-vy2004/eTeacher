@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS leads (
     author TEXT,
     post_time TEXT,
     post_url TEXT NOT NULL UNIQUE,
+    content TEXT,
     collected_at TEXT NOT NULL
 );
 """
@@ -55,6 +56,14 @@ def init_db(db_path: str | Path | None = None) -> None:
     try:
         with get_connection(path) as conn:
             conn.executescript(SCHEMA_SQL)
+            # Automatic schema migration for content column if database already existed
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(leads)")
+            existing_columns = {row["name"] for row in cursor.fetchall()}
+            if "content" not in existing_columns:
+                cursor.execute("ALTER TABLE leads ADD COLUMN content TEXT")
+                conn.commit()
+                logger.info("Migrated SQLite schema: added 'content' column to leads table.")
         logger.info(f"Database initialized successfully at {path}")
     except sqlite3.Error as e:
         logger.error(f"Failed to initialize database at {path}: {e}")
@@ -99,8 +108,8 @@ def insert_lead(lead: Lead, db_path: str | Path | None = None) -> bool:
     """
     path = _resolve_db_path(db_path)
     insert_sql = """
-    INSERT INTO leads (group_name, keyword, author, post_time, post_url, collected_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO leads (group_name, keyword, author, post_time, post_url, content, collected_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     """
     try:
         with get_connection(path) as conn:
@@ -113,6 +122,7 @@ def insert_lead(lead: Lead, db_path: str | Path | None = None) -> bool:
                     lead.author,
                     lead.post_time.isoformat(),
                     lead.post_url,
+                    lead.content,
                     lead.collected_at.isoformat(),
                 ),
             )
@@ -142,7 +152,7 @@ def get_all_leads(db_path: str | Path | None = None) -> list[Lead]:
         with get_connection(path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT group_name, keyword, author, post_time, post_url, collected_at FROM leads ORDER BY id DESC"
+                "SELECT group_name, keyword, author, post_time, post_url, content, collected_at FROM leads ORDER BY id DESC"
             )
             for row in cursor.fetchall():
                 leads.append(
@@ -152,6 +162,7 @@ def get_all_leads(db_path: str | Path | None = None) -> list[Lead]:
                         author=row["author"] or "Unknown",
                         post_time=datetime.fromisoformat(row["post_time"]),
                         post_url=row["post_url"],
+                        content=row["content"] or "" if "content" in row.keys() else "",
                         collected_at=datetime.fromisoformat(row["collected_at"]),
                     )
                 )
