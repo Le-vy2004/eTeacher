@@ -147,13 +147,7 @@ def run(
     if selenium:
         target_group = group or source_id or settings.facebook_group_url or settings.facebook_source_id
         target_keyword = (keyword or "tìm gia sư").strip()
-        if not target_group:
-            raise ValueError(
-                "Yêu cầu cung cấp link hoặc ID Nhóm Facebook để tìm kiếm theo nhóm!\n"
-                "Ví dụ: python main.py --selenium --group 'https://www.facebook.com/groups/...' --keyword 'tìm gia sư'\n"
-                "(hoặc cấu hình FACEBOOK_GROUP_URL trong file .env)"
-            )
-        effective_source_id = f"{target_group}||{target_keyword}"
+        effective_source_id = f"{target_group}||{target_keyword}" if target_group else target_keyword
     else:
         effective_source_id = group or source_id or settings.facebook_source_id or "default_source"
 

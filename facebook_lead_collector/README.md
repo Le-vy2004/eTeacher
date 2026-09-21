@@ -289,23 +289,31 @@ New leads: 0
 
 Hệ thống hỗ trợ truy cập trực tiếp vào **Nhóm Facebook (Group)**, tự động tìm kiếm theo từ khóa bên trong nhóm, trích xuất chính xác permalink của bài viết, tác giả, thời gian đăng và nội dung đầy đủ để đổ về Google Sheets.
 
-### 6.1. Cấu hình nhanh qua file `.env`
-Điền link nhóm mặc định vào file `.env`:
-```env
-FACEBOOK_GROUP_URL=https://www.facebook.com/groups/your_group_id/
-PROFILE_NAME=Profile 7
+### 6.1. Tự Động Tìm Nhóm Trên Facebook (Không cần điền link nhóm trước)
+
+Bạn **không cần phải điền sẵn link nhóm**. Hệ thống sẽ tự động:
+1. Lên Facebook tìm kiếm các nhóm gia sư phù hợp với từ khóa bạn nhập.
+2. Tự động truy cập vào từng nhóm tìm được.
+3. Dò tìm bài viết theo từ khóa bên trong từng nhóm.
+4. Trích xuất chính xác link permalink bài viết, tên người đăng, thời gian và nội dung.
+5. Đổ dữ liệu về Google Sheets.
+
+**Lệnh thực thi đơn giản nhất:**
+```powershell
+.\.venv\Scripts\python.exe main.py --selenium --keyword "tìm gia sư"
 ```
+*(Bạn có thể thay đổi `--keyword` thành `"cần gia sư toán"`, `"gia sư tiếng anh"`, v.v.)*
 
-### 6.2. Lệnh chạy tìm kiếm trong Nhóm
+### 6.2. (Tùy chọn) Quét Theo Nhóm Chỉ Định Sẵn
 
-- **Chạy với nhóm và từ khóa chỉ định:**
-  ```powershell
-  .\.venv\Scripts\python.exe main.py --selenium --group "https://www.facebook.com/groups/123456789/" --keyword "tìm gia sư"
-  ```
-- **Chạy quét nhiều nhóm cùng lúc (cách nhau bằng dấu phẩy):**
-  ```powershell
-  .\.venv\Scripts\python.exe main.py --selenium --group "https://www.facebook.com/groups/nhom1,https://www.facebook.com/groups/nhom2" --keyword "tìm gia sư"
-  ```
+Nếu bạn muốn quét đích danh một hoặc nhiều nhóm cụ thể:
+```powershell
+.\.venv\Scripts\python.exe main.py --selenium --group "https://www.facebook.com/groups/ID_NHOM/" --keyword "tìm gia sư"
+```
+Hoặc quét nhiều nhóm cùng lúc (cách nhau bởi dấu phẩy):
+```powershell
+.\.venv\Scripts\python.exe main.py --selenium --group "https://www.facebook.com/groups/nhom1,https://www.facebook.com/groups/nhom2" --keyword "tìm gia sư"
+```
 - **Cấu trúc dữ liệu đổ về Google Sheets:**
   - Cột A: **Link bài viết** (Link permalink chuẩn, click vào xem trực tiếp bài đăng)
   - Cột B: **Tên người đăng**

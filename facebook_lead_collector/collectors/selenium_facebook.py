@@ -519,13 +519,82 @@ class SeleniumFacebookSearchCollector(BaseCollector):
             pass
         return fallback_url
 
+    def _discover_groups(self, driver, keyword: str, max_groups: int = 5) -> list[dict[str, str]]:
+        """Search Facebook for Groups related to keyword and return discovered groups."""
+        from selenium.common.exceptions import TimeoutException
+
+        query = keyword.strip() or "tìm gia sư"
+        groups_search_url = f"https://www.facebook.com/search/groups/?q={quote_plus(query)}"
+        logger.info(f"Đang tự động tìm kiếm các Nhóm trên Facebook theo từ khóa '{query}'...")
+        logger.info(f"URL tìm nhóm: {groups_search_url}")
+
+        try:
+            driver.get(groups_search_url)
+            time.sleep(4.5)
+        except TimeoutException:
+            driver.execute_script("window.stop();")
+
+        # Scroll down to load group results
+        for s in range(3):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2.0)
+
+        js_find_groups = """
+        const groups = [];
+        const seen = new Set();
+        const invalid = new Set(['feed', 'discover', 'joins', 'create', 'categories', 'notifications', 'search', 'user', 'profile.php']);
+
+        document.querySelectorAll('a[href*="/groups/"]').forEach(a => {
+            try {
+                const href = a.href || a.getAttribute('href') || '';
+                const u = new URL(href, window.location.origin);
+                const match = u.pathname.match(/^\\/groups\\/([^\\/]+)(?:\\/|$)/);
+                if (match) {
+                    const slug = match[1].toLowerCase();
+                    if (!invalid.has(slug) && !slug.includes('search') && !slug.includes('user')) {
+                        const cleanUrl = 'https://www.facebook.com/groups/' + match[1] + '/';
+                        if (!seen.has(cleanUrl)) {
+                            seen.add(cleanUrl);
+                            let name = (a.innerText || '').trim();
+                            if (!name || name.length < 3 || name.toLowerCase().includes('tham gia')) {
+                                const card = a.closest('div[role="feed"] > div, div[role="main"] div') || a.parentElement?.parentElement;
+                                const heading = card ? card.querySelector('h2, h3, strong, a[role="link"] span') : null;
+                                if (heading && (heading.innerText || '').trim()) {
+                                    name = heading.innerText.trim();
+                                }
+                            }
+                            if (!name || name.toLowerCase().includes('tham gia')) {
+                                name = 'Nhóm ' + match[1];
+                            }
+                            groups.push({ url: cleanUrl, name: name });
+                        }
+                    }
+                }
+            } catch(e) {}
+        });
+        return groups;
+        """
+        try:
+            raw_groups = driver.execute_script(js_find_groups) or []
+        except Exception as e:
+            logger.error(f"Error executing group discovery script: {e}")
+            raw_groups = []
+
+        discovered = raw_groups[:max_groups]
+        if discovered:
+            logger.info(f"Tự động tìm thấy {len(discovered)} nhóm phù hợp trên Facebook:")
+            for idx, g in enumerate(discovered, 1):
+                logger.info(f"  {idx}. {g.get('name')} -> {g.get('url')}")
+        else:
+            logger.warning(f"Chưa tìm thấy nhóm nào với từ khóa '{query}'.")
+
+        return discovered
+
     def collect_posts(self, source_id: str, limit: int = 100) -> list[FacebookPost]:
         """Navigate to Facebook Group(s), search by keyword, and extract posts."""
         from selenium.common.exceptions import TimeoutException
 
         target = (source_id or "").strip()
-        if not target:
-            raise ValueError("Group URL or ID is required for Selenium group search.")
 
         # Parse group and keyword
         group_raw = None
@@ -537,19 +606,11 @@ class SeleniumFacebookSearchCollector(BaseCollector):
             keyword = "tìm gia sư"
         else:
             group_raw = None
-            keyword = target
+            keyword = target or "tìm gia sư"
 
         settings = get_settings()
         final_group_raw = group_raw or settings.facebook_group_url or settings.facebook_source_id
-        if not final_group_raw:
-            raise ValueError(
-                "Chưa cấu hình nhóm Facebook! Vui lòng cung cấp link nhóm qua tham số --group <URL_NHÓM> "
-                "hoặc đặt FACEBOOK_GROUP_URL trong file .env."
-            )
-
         search_keyword = (keyword or "tìm gia sư").strip()
-        # Support multiple groups separated by comma
-        group_urls = [normalize_group_url(g) for g in final_group_raw.split(",") if g.strip()]
 
         logger.info(f"Initializing Chrome WebDriver (Profile: '{self.profile_name}')...")
         driver = self._driver or self._build_driver()
@@ -577,26 +638,54 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                 except TimeoutException:
                     driver.execute_script("window.stop();")
 
-            for group_url in group_urls:
+            # Determine list of groups to scrape:
+            # 1. If user gave group(s), use them.
+            # 2. Otherwise, automatically search Facebook for relevant groups!
+            group_items = []
+            if final_group_raw:
+                for g in final_group_raw.split(","):
+                    if g.strip():
+                        norm_url = normalize_group_url(g)
+                        group_items.append({"url": norm_url, "name": norm_url})
+            else:
+                logger.info(
+                    f"Không có link nhóm sẵn -> Tự động tìm kiếm các Nhóm liên quan trên Facebook theo từ khóa: '{search_keyword}'"
+                )
+                discovered = self._discover_groups(driver, search_keyword, max_groups=5)
+                if not discovered and search_keyword != "gia sư":
+                    logger.info("Thử mở rộng tìm kiếm nhóm với từ khóa 'gia sư'...")
+                    discovered = self._discover_groups(driver, "gia sư", max_groups=5)
+                group_items = discovered
+
+            if not group_items:
+                logger.error("Không xác định được nhóm Facebook nào để tìm bài. Vui lòng kiểm tra lại kết nối.")
+                return []
+
+            logger.info(f"Bắt đầu quét qua {len(group_items)} nhóm Facebook...")
+
+            for g_info in group_items:
                 if len(posts) >= limit:
                     break
 
+                group_url = g_info["url"]
+                group_name_hint = g_info.get("name") or group_url
+
                 search_url = build_group_search_url(group_url, search_keyword)
-                logger.info(f"Navigating to Group Search URL: {search_url}")
+                logger.info(f"\n---> Truy cập Nhóm: '{group_name_hint}'")
+                logger.info(f"Dò tìm bài viết theo key '{search_keyword}': {search_url}")
 
                 try:
                     driver.get(search_url)
-                    time.sleep(4.0)
+                    time.sleep(4.5)
                 except TimeoutException:
-                    logger.warning(f"Timeout opening {search_url}; attempting to continue with rendered DOM.")
+                    logger.warning(f"Timeout opening {search_url}; continuing with rendered DOM.")
                     driver.execute_script("window.stop();")
 
-                group_display_name = self._get_page_group_name(driver, group_url)
-                logger.info(f"Searching inside group '{group_display_name}' for keyword: '{search_keyword}'")
+                group_display_name = self._get_page_group_name(driver, group_name_hint)
 
-                # Dynamic scrolling to load feed results
+                # Dynamic scrolling to load feed results inside the group
                 scroll_count = max(self.scrolls, 5)
-                logger.info(f"Scrolling {scroll_count} times to load dynamic feed content...")
+                logger.info(f"Cuộn trang {scroll_count} lần để tải danh sách bài viết...")
                 for scroll_idx in range(scroll_count):
                     scroll_script = """
                     window.scrollTo(0, document.body.scrollHeight);
@@ -608,12 +697,11 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                     });
                     """
                     driver.execute_script(scroll_script)
-                    logger.info(f"Scroll {scroll_idx + 1}/{scroll_count} completed.")
                     time.sleep(random.uniform(*self.sleep_range))
 
-                logger.info("Extracting verified post links and content from rendered DOM...")
+                logger.info("Trích xuất các bài viết và permalink thực tế...")
                 raw_posts = self._extract_posts_js(driver, group_name_fallback=group_display_name, limit=limit)
-                logger.info(f"Retrieved {len(raw_posts)} valid post(s) with confirmed permalinks from this group.")
+                logger.info(f"Thu thập được {len(raw_posts)} bài viết có permalink hợp lệ từ nhóm này.")
 
                 for item in raw_posts:
                     if len(posts) >= limit:
@@ -644,5 +732,5 @@ class SeleniumFacebookSearchCollector(BaseCollector):
             if self._owns_driver:
                 driver.quit()
 
-        logger.info(f"Collected total of {len(posts)} verified post(s) from Facebook Groups.")
+        logger.info(f"\nHoàn tất: Thu thập được tổng cộng {len(posts)} bài viết có link hợp lệ từ các nhóm Facebook.")
         return posts
