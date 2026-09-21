@@ -71,6 +71,9 @@ class Settings(BaseModel):
     database_path: str = Field(
         default_factory=lambda: os.getenv("DATABASE_PATH", "data/leads.db").strip()
     )
+    sources_file: str = Field(
+        default_factory=lambda: os.getenv("SOURCES_FILE", "data/sources.txt").strip()
+    )
 
     # Collector parameters
     collector_limit: int = Field(
@@ -107,6 +110,22 @@ class Settings(BaseModel):
         if not cred_path.is_absolute():
             cred_path = BASE_DIR / cred_path
         return cred_path
+
+    @property
+    def resolved_chrome_user_data_path(self) -> Path:
+        """Resolve Chrome user data directory path relative to project root if not absolute."""
+        user_data = Path(self.chrome_user_data)
+        if not user_data.is_absolute():
+            user_data = BASE_DIR / user_data
+        return user_data
+
+    @property
+    def resolved_sources_file_path(self) -> Path:
+        """Resolve sources text file path relative to project root if not absolute."""
+        src_path = Path(self.sources_file)
+        if not src_path.is_absolute():
+            src_path = BASE_DIR / src_path
+        return src_path
 
     @property
     def has_facebook_credentials(self) -> bool:

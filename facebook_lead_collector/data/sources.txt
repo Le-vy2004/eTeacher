@@ -1,0 +1,11 @@
+# ======================================================================
+# DANH SÁCH CÁC TRANG / NHÓM FACEBOOK CẦN THU THẬP DỮ LIỆU (RAW DATA)
+# Mỗi dòng là 1 đường dẫn Nhóm/Trang Facebook hoặc ID nhóm
+# Dòng bắt đầu bằng dấu # là ghi chú (bỏ qua)
+# ======================================================================
+
+# 1. Hội Phụ Huynh & Gia Sư Toàn Quốc
+https://www.facebook.com/groups/711749030995107/
+
+# 2. Diễn Đàn Gia Sư Hà Nội & TPHCM
+https://www.facebook.com/groups/280811807457314/

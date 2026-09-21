@@ -25,7 +25,6 @@ DEFAULT_KEYWORDS: list[str] = [
     "nhận lớp dạy kèm",
     "gia sư toán",
     "gia sư tiếng anh",
-    "gia sư tiếng Anh",
     "gia sư lý",
     "gia sư hóa",
     "gia sư văn",
@@ -38,24 +37,40 @@ DEFAULT_KEYWORDS: list[str] = [
     "gia sư tại nhà",
     "dạy toán",
     "dạy tiếng anh",
-    "dạy tiếng Anh",
     "dạy kèm tại nhà",
+    "gia sư tphcm",
+    "gia sư hồ chí minh",
+    "gia sư sài gòn",
+    "gia sư hà nội",
+    "tìm gia sư tphcm",
+    "tìm gia sư thành phố hồ chí minh",
+    "tìm gia sư sài gòn",
+    "cần gia sư tphcm",
 ]
 
+# Từ khóa loại trừ (Spam / Bài tuyển dụng bán hàng, phục vụ, việc làm khác)
+NEGATIVE_KEYWORDS: list[str] = [
+    "tuyển nhân viên",
+    "bán quần áo",
+    "bán hàng",
+    "bán thời gian",
+    "phục vụ",
+    "bảo vệ",
+    "tuyển thợ",
+    "thanh lý",
+    "cho thuê nhà",
+    "cho thuê phòng",
+    "tuyển tạp vụ",
+    "nhân viên phục vụ",
+    "giao hàng",
+    "tuyển telesale",
+]
 
 def find_matching_keywords(
     text: str | None,
     keywords: list[str] | None = None,
 ) -> list[str]:
-    """Find all matching keywords in post content.
-
-    Characteristics:
-    - Case-insensitive matching.
-    - Handles redundant whitespaces and linebreaks.
-    - Supports Vietnamese Unicode (NFC normalized).
-    - Can return multiple keywords if post matches more than one.
-    - Deduplicates case-variants (e.g., 'gia sư tiếng anh' vs 'gia sư tiếng Anh').
-    - Returns empty list [] if no matches found.
+    """Find all matching keywords in post content with negative keyword filtering.
 
     Args:
         text: Post content to analyze.
@@ -72,6 +87,12 @@ def find_matching_keywords(
     if not cleaned_text:
         return []
 
+    # Check negative keywords first (Loại bỏ các bài tuyển dụng bán quần áo, tạp vụ...)
+    has_tutor_intent = any(core in cleaned_text for core in ["gia sư", "dạy kèm", "lớp dạy", "tìm giáo viên", "cần giáo viên"])
+    for neg_kw in NEGATIVE_KEYWORDS:
+        if neg_kw in cleaned_text and not has_tutor_intent:
+            return []
+
     target_keywords = keywords if keywords is not None else DEFAULT_KEYWORDS
 
     matched: list[str] = []
@@ -81,10 +102,13 @@ def find_matching_keywords(
         normalized_kw = normalize_text(kw)
         lower_kw = normalized_kw.lower()
 
+        # Bỏ qua các địa danh đứng một mình (hcm, tphcm, hà nội) nếu không đi kèm gia sư
+        if lower_kw in ["hcm", "tphcm", "hồ chí minh", "thành phố hồ chí minh", "hà nội", "sài gòn"]:
+            continue
+
         if not lower_kw or lower_kw in seen_lower:
             continue
 
-        # Check if lowercase keyword exists in lowercase cleaned text
         if lower_kw in cleaned_text:
             matched.append(normalized_kw)
             seen_lower.add(lower_kw)
@@ -99,15 +123,8 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    test_samples = [
-        "Phụ huynh cần tìm gia sư toán lớp 8 tại Quận 7.",
-        "CẦN GIA SƯ TIẾNG ANH ôn thi chứng chỉ IELTS",
-        "Thanh lý bộ bàn ghế học sinh giá rẻ",
-        "Gia đình đang cần giáo viên dạy kèm gia sư lý và hóa",
-    ]
-
-    print("\n--- Kiểm Tra Bộ Lọc Keyword Filter ---")
-    for sample in test_samples:
-        matches = find_matching_keywords(sample)
-        print(f"Nội dung: \"{sample}\"")
-        print(f"-> Khớp từ khóa: {matches if matches else '[Không khớp]'}\n")
+    test_text = "TUYỂN NHÂN VIÊN NỮ BÁN QUẦN ÁO tại Tân Phú TP.HCM"
+    print("Test tuyển bán quần áo:", find_matching_keywords(test_text))
+    
+    tutor_text = "Cần tìm gia sư dạy tiếng anh tại nhà cho bé khu vực kim chung đông anh"
+    print("Test bài gia sư thật:", find_matching_keywords(tutor_text))

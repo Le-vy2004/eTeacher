@@ -60,3 +60,10 @@ htmlcov/
 # Logs
 *.log
 logs/
+
+# Chrome Profile & Browser Session Data (Contains login session & cookies)
+profiles/*
+!profiles/.gitkeep
+Selenium User Data/
+chrome_profile/
+

@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment and Secrets
+.env
+service_account.json
+credentials.json
+
+# SQLite Databases & Dynamic Data
+*.db
+*.sqlite
+*.sqlite3
+
+# Chrome Profiles & Browser Sessions (Session login tokens, cookies, cache)
+facebook_lead_collector/profiles/*
+!facebook_lead_collector/profiles/.gitkeep
+facebook_lead_collector/Selenium User Data/
+chrome_profile/
+Selenium User Data/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/

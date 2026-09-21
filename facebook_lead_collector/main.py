@@ -1,25 +1,27 @@
 """Main entrypoint and pipeline execution for Facebook Lead Collector."""
 import argparse
-from datetime import datetime
-from pathlib import Path
 import sys
 import time
+from datetime import datetime
+from pathlib import Path
 
-# Ensure UTF-8 output on Windows consoles to prevent UnicodeEncodeError
-if sys.platform == "win32":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+project_dir = Path(__file__).resolve().parent
+if str(project_dir) not in sys.path:
+    sys.path.insert(0, str(project_dir))
+
+# Auto-detect & inject project virtualenv (.venv) if global python is used
+try:
+    import dotenv
+except ImportError:
+    venv_sites = list(project_dir.glob(".venv/lib/python*/site-packages"))
+    if venv_sites:
+        sys.path.insert(0, str(venv_sites[0]))
 
 from collectors.base import BaseCollector
-from collectors.facebook import FacebookCollector
-from collectors.mock import MockFacebookCollector
 from collectors.selenium_facebook import SeleniumFacebookSearchCollector
 from config import get_settings
-from database.sqlite_db import get_all_leads, init_db, insert_lead, lead_exists
-from filters.keyword_filter import find_matching_keywords
+from database.sqlite_db import get_all_leads, get_sources_from_db, init_db, insert_lead, lead_exists, load_sources_from_file
+from filters.keyword_filter import DEFAULT_KEYWORDS, find_matching_keywords
 from models.post import FacebookPost, Lead
 from pydantic import BaseModel, Field
 from sheets.google_sheets import GoogleSheetsClient
@@ -41,47 +43,27 @@ def process_posts(
     posts: list[FacebookPost],
     db_path: Path | str | None = None,
     sheets_client: GoogleSheetsClient | None = None,
+    keywords: list[str] | None = None,
 ) -> PipelineStats:
-    """Process a list of Facebook posts through the lead qualification pipeline.
-
-    Workflow per post:
-    1. Extract and validate content.
-    2. Match keywords. If no match -> skip.
-    3. Check if post_url already exists in SQLite. If exists -> skip as duplicate.
-    4. Construct Lead model.
-    5. Save to SQLite database.
-    6. Save to Google Sheets if connected and not duplicate.
-
-    Args:
-        posts: List of FacebookPost objects.
-        db_path: Optional custom SQLite database path.
-        sheets_client: Optional connected GoogleSheetsClient instance.
-
-    Returns:
-        PipelineStats containing summary metrics and list of new leads.
-    """
+    """Process a list of Facebook posts through the lead qualification pipeline."""
     stats = PipelineStats(collected_count=len(posts))
 
     for post in posts:
         try:
-            # 1. Content extraction
             content = post.content
             if not content or not content.strip():
                 continue
 
-            # 2. Keyword matching
-            matched_keywords = find_matching_keywords(content)
+            matched_keywords = find_matching_keywords(content, keywords=keywords)
             if not matched_keywords:
                 continue
 
             stats.matched_count += 1
 
-            # 3. SQLite deduplication check
             if lead_exists(post.post_url, db_path=db_path):
                 stats.duplicate_count += 1
                 continue
 
-            # 4. Create Lead
             lead = Lead(
                 group_name=post.group_name,
                 keyword=", ".join(matched_keywords),
@@ -92,149 +74,92 @@ def process_posts(
                 collected_at=datetime.now(),
             )
 
-            # 5. Save to SQLite
-            saved = insert_lead(lead, db_path=db_path)
-            if not saved:
+            if not insert_lead(lead, db_path=db_path):
                 stats.duplicate_count += 1
                 continue
 
             stats.new_leads_count += 1
             stats.new_leads.append(lead)
 
-            # 6. Save to Google Sheets (if connected)
             if sheets_client and sheets_client.is_connected:
                 sheets_client.append_lead(lead)
 
         except Exception as e:
             stats.error_count += 1
-            logger.error(
-                f"Error processing post {getattr(post, 'post_id', 'unknown')}: {e}",
-                exc_info=True,
-            )
-            continue
+            logger.error(f"Error processing post {getattr(post, 'post_id', 'unknown')}: {e}")
 
     return stats
 
 
 def run(
     source_id: str | None = None,
-    group: str | None = None,
-    mock: bool = False,
     limit: int | None = None,
     db_path: Path | str | None = None,
     enable_sheets: bool = True,
-    token: str | None = None,
-    selenium: bool = False,
     keyword: str | None = None,
     profile: str | None = None,
 ) -> PipelineStats:
-    """Execute the full lead collection pipeline once.
-
-    Args:
-        source_id: Facebook group/page ID or full URL, or mock source name.
-        group: Facebook Group URL(s) or ID(s) to search inside.
-        mock: If True, uses MockFacebookCollector without live API.
-        limit: Max number of posts to retrieve.
-        db_path: Optional custom SQLite path.
-        enable_sheets: Whether to attempt Google Sheets synchronization.
-        token: Optional Facebook access token (overrides config).
-
-    Returns:
-        PipelineStats with execution results.
-    """
+    """Execute lead collection for a single source or keyword."""
     settings = get_settings()
     actual_limit = limit or settings.collector_limit
-    if selenium:
-        target_group = group or source_id or settings.facebook_group_url or settings.facebook_source_id
-        target_keyword = (keyword or "tìm gia sư").strip()
-        effective_source_id = f"{target_group}||{target_keyword}" if target_group else target_keyword
-    else:
-        effective_source_id = group or source_id or settings.facebook_source_id or "default_source"
+    effective_source = source_id or keyword or "https://www.facebook.com/groups/711749030995107/"
 
-    logger.info("Starting collector")
-
-    # 1. Initialize SQLite Database
     resolved_db = db_path or settings.resolved_database_path
-    try:
-        init_db(resolved_db)
-        logger.info(f"Database connection verified at: {resolved_db}")
-    except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
-        raise
+    init_db(resolved_db)
 
-    # 2. Initialize Google Sheets (optional fallback)
     sheets_client: GoogleSheetsClient | None = None
     if enable_sheets:
         sheets_client = GoogleSheetsClient()
         if settings.has_google_credentials:
-            if sheets_client.connect():
-                # Auto-sync existing leads in SQLite to Google Sheets
-                existing_db_leads = get_all_leads(db_path=resolved_db)
-                if existing_db_leads:
-                    synced = sheets_client.append_leads(list(reversed(existing_db_leads)))
-                    if synced > 0:
-                        logger.info(f"Synchronized {synced} existing leads from database to Google Sheets.")
-        else:
-            if not mock:
-                logger.warning(
-                    f"Google credentials not found at '{settings.resolved_google_credentials_path}'. "
-                    "Google Sheets syncing will be skipped."
-                )
+            sheets_client.connect()
 
-    # 3. Instantiate Collector
-    collector: BaseCollector
-    if mock:
-        collector = MockFacebookCollector()
-    elif selenium:
-        collector = SeleniumFacebookSearchCollector(profile_name=profile)
-    else:
-        active_token = token or settings.facebook_access_token
-        if not active_token:
-            error_msg = (
-                "Facebook access token is missing.\n"
-                "Please set FACEBOOK_ACCESS_TOKEN in .env or pass --token <TOKEN>,\n"
-                "or run with --mock flag to test with simulated data."
+    collector: BaseCollector = SeleniumFacebookSearchCollector(profile_name=profile)
+    posts = collector.collect_posts(source_id=effective_source, limit=actual_limit)
+    logger.info(f"Collected {len(posts)} posts from source '{effective_source}'")
+
+    custom_keywords = list(DEFAULT_KEYWORDS)
+    if keyword and keyword not in custom_keywords:
+        custom_keywords.insert(0, keyword)
+
+    return process_posts(posts, db_path=resolved_db, sheets_client=sheets_client, keywords=custom_keywords)
+
+
+def run_batch_sources(args: argparse.Namespace, target_sources: list[str]) -> PipelineStats:
+    """Run raw data collection sequentially for target group/page URLs."""
+    logger.info(f"🚀 BẮT ĐẦU CHẠY TUẦN TỰ QUÉT DATA VỚI {len(target_sources)} NHÓM / TRANG FACEBOOK:")
+    combined_stats = PipelineStats()
+
+    for idx, src in enumerate(target_sources, 1):
+        print("\n" + "=" * 70)
+        print(f"🚀 [{idx}/{len(target_sources)}] CHUYỂN TỚI NHÓM / TRANG: {src}")
+        print("=" * 70)
+
+        try:
+            stats = run(
+                source_id=src,
+                limit=args.limit,
+                db_path=args.db_path,
+                keyword=args.keyword,
+                profile=args.profile,
             )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-        collector = FacebookCollector(
-            access_token=active_token,
-            api_base_url=settings.facebook_api_base_url,
-        )
+            combined_stats.collected_count += stats.collected_count
+            combined_stats.matched_count += stats.matched_count
+            combined_stats.duplicate_count += stats.duplicate_count
+            combined_stats.new_leads_count += stats.new_leads_count
+            combined_stats.new_leads.extend(stats.new_leads)
+        except Exception as e:
+            logger.error(f"❌ Lỗi khi quét nguồn {src}: {e}")
 
-    # 4. Collect Posts
-    try:
-        posts = collector.collect_posts(
-            source_id=effective_source_id, limit=actual_limit
-        )
-        logger.info(f"Collected {len(posts)} posts")
-    except Exception as e:
-        logger.error(f"Collector encountered fatal error: {e}")
-        raise
-
-    # 5. Process Posts through Pipeline
-    stats = process_posts(posts, db_path=resolved_db, sheets_client=sheets_client)
-
-    logger.info(f"Found {stats.matched_count} matching posts")
-    logger.info(f"Added {stats.new_leads_count} new leads")
-    if stats.duplicate_count > 0:
-        logger.info(f"Skipped {stats.duplicate_count} duplicate posts")
-    if stats.error_count > 0:
-        logger.warning(f"Encountered {stats.error_count} processing errors")
-
-    return stats
+    return combined_stats
 
 
 def print_cli_summary(stats: PipelineStats) -> None:
-    """Print clean user-facing CLI summary block."""
-    print()
-    print("Starting Facebook Lead Collector...")
-    print()
+    """Print user-facing CLI execution summary."""
+    print("\nStarting Facebook Lead Collector...\n")
     print(f"Collected: {stats.collected_count} posts")
     print(f"Keyword matched: {stats.matched_count}")
     print(f"Duplicates: {stats.duplicate_count}")
-    print(f"New leads: {stats.new_leads_count}")
-    print()
+    print(f"New leads: {stats.new_leads_count}\n")
     if stats.new_leads:
         print("New leads:")
         for idx, lead in enumerate(stats.new_leads, 1):
@@ -245,73 +170,15 @@ def print_cli_summary(stats: PipelineStats) -> None:
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Facebook Lead Collector - Automated Tutoring Lead Extraction"
-    )
-    parser.add_argument(
-        "--mock",
-        action="store_true",
-        help="Run in mock mode with simulated data (no Facebook/Google credentials required)",
-    )
-    parser.add_argument(
-        "--selenium",
-        action="store_true",
-        help="Search Facebook posts with the existing local Chrome profile.",
-    )
-    parser.add_argument(
-        "--keyword",
-        type=str,
-        default=None,
-        help="Keyword for --selenium, for example: 'tìm gia sư'.",
-    )
-    parser.add_argument(
-        "--profile",
-        type=str,
-        default=None,
-        help="Chrome profile name, for example: 'Profile 7' or '7'.",
-    )
-    parser.add_argument(
-        "--group",
-        type=str,
-        default=None,
-        help="Facebook Group URL or numeric ID (e.g. 'https://www.facebook.com/groups/123456789/')",
-    )
-    parser.add_argument(
-        "--source",
-        type=str,
-        default=None,
-        help="Facebook Group URL, Page URL, or numeric ID to collect posts from",
-    )
-    parser.add_argument(
-        "--token",
-        type=str,
-        default=None,
-        help="Facebook Graph API Access Token (overrides .env)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Maximum number of posts to fetch (default from config: 100)",
-    )
-    parser.add_argument(
-        "--db-path",
-        type=str,
-        default=None,
-        help="Custom path to SQLite database file",
-    )
-    parser.add_argument(
-        "--schedule",
-        type=int,
-        default=0,
-        metavar="MINUTES",
-        help="Run periodically every N minutes",
-    )
-    parser.add_argument(
-        "--init-db",
-        action="store_true",
-        help="Initialize the SQLite database schema and exit",
-    )
+    parser = argparse.ArgumentParser(description="Facebook Lead Collector - Automated Tutoring Lead Extraction")
+    parser.add_argument("--source", type=str, default=None, help="Facebook Group/Page URL to collect posts from")
+    parser.add_argument("--sources-file", type=str, default=None, help="Path to text file containing target URLs")
+    parser.add_argument("--keyword", type=str, default=None, help="Keyword search fallback (e.g. 'tìm gia sư')")
+    parser.add_argument("--profile", type=str, default=None, help="Chrome profile name (default: Profile 7)")
+    parser.add_argument("--limit", type=int, default=None, help="Maximum number of posts to fetch")
+    parser.add_argument("--db-path", type=str, default=None, help="Custom path to SQLite database file")
+    parser.add_argument("--schedule", type=int, default=0, metavar="MINUTES", help="Run periodically every N minutes")
+    parser.add_argument("--init-db", action="store_true", help="Initialize SQLite database schema and exit")
     return parser.parse_args()
 
 
@@ -324,52 +191,43 @@ def main() -> None:
         print("Database initialized successfully.")
         return
 
-    # Periodic schedule mode
+    file_sources = load_sources_from_file(args.sources_file)
+    db_sources = get_sources_from_db(args.db_path)
+    all_sources = list(dict.fromkeys(file_sources + db_sources))
+
+    def execute():
+        if not args.source and all_sources:
+            return run_batch_sources(args, all_sources)
+        return run(
+            source_id=args.source,
+            limit=args.limit,
+            db_path=args.db_path,
+            keyword=args.keyword,
+            profile=args.profile,
+        )
+
     if args.schedule > 0:
         logger.info(f"Running periodic scheduler every {args.schedule} minute(s)...")
         try:
             iteration = 1
             while True:
-                logger.info(f"--- Starting run cycle #{iteration} ---")
+                logger.info(f"--- Cycle #{iteration} ---")
                 try:
-                    stats = run(
-                        source_id=args.source,
-                        group=args.group,
-                        mock=args.mock,
-                        limit=args.limit,
-                        db_path=args.db_path,
-                        token=args.token,
-                        selenium=args.selenium,
-                        keyword=args.keyword,
-                        profile=args.profile,
-                    )
+                    stats = execute()
                     print_cli_summary(stats)
                 except Exception as e:
-                    logger.error(f"Cycle #{iteration} encountered error: {e}")
-
+                    logger.error(f"Cycle #{iteration} error: {e}")
                 iteration += 1
-                logger.info(f"Sleeping for {args.schedule} minute(s)... (Press Ctrl+C to stop)")
                 time.sleep(args.schedule * 60)
         except KeyboardInterrupt:
-            logger.info("Periodic scheduler stopped by user.")
+            logger.info("Scheduler stopped.")
             sys.exit(0)
     else:
-        # Single run execution
         try:
-            stats = run(
-                source_id=args.source,
-                group=args.group,
-                mock=args.mock,
-                limit=args.limit,
-                db_path=args.db_path,
-                token=args.token,
-                selenium=args.selenium,
-                keyword=args.keyword,
-                profile=args.profile,
-            )
+            stats = execute()
             print_cli_summary(stats)
-        except ValueError as e:
-            print(f"\n[!] Configuration Error: {e}\n", file=sys.stderr)
+        except Exception as e:
+            print(f"\n[!] Execution Error: {e}\n", file=sys.stderr)
             sys.exit(1)
 
 

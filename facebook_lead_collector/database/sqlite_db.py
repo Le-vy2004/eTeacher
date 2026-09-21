@@ -25,6 +25,13 @@ CREATE TABLE IF NOT EXISTS leads (
     content TEXT,
     collected_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url_or_id TEXT NOT NULL UNIQUE,
+    name TEXT,
+    added_at TEXT NOT NULL
+);
 """
 
 
@@ -169,6 +176,62 @@ def get_all_leads(db_path: str | Path | None = None) -> list[Lead]:
     except sqlite3.Error as e:
         logger.error(f"Failed to fetch leads from database: {e}")
     return leads
+
+
+def load_sources_from_file(sources_file: str | Path | None = None) -> list[str]:
+    """Read target Facebook group/page URLs from a text file, ignoring empty lines & comments."""
+    if sources_file is None:
+        target_path = get_settings().resolved_sources_file_path
+    else:
+        target_path = Path(sources_file)
+
+    if not target_path.exists():
+        logger.warning(f"Sources file not found at '{target_path}'. Creating empty template...")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text("# Danh sách các trang/nhóm Facebook cần quét (mỗi dòng 1 URL)\n", encoding="utf-8")
+        return []
+
+    sources = []
+    with target_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                sources.append(line)
+
+    return sources
+
+
+def save_source_to_db(url_or_id: str, name: str = "", db_path: str | Path | None = None) -> bool:
+    """Save a new group/page source URL into SQLite sources table."""
+    if not url_or_id:
+        return False
+    path = _resolve_db_path(db_path)
+    sql = "INSERT INTO sources (url_or_id, name, added_at) VALUES (?, ?, ?)"
+    try:
+        with get_connection(path) as conn:
+            conn.execute(sql, (url_or_id, name, datetime.now().isoformat()))
+            conn.commit()
+            return True
+    except sqlite3.IntegrityError:
+        return False
+    except sqlite3.Error as e:
+        logger.error(f"Failed to save source {url_or_id}: {e}")
+        return False
+
+
+def get_sources_from_db(db_path: str | Path | None = None) -> list[str]:
+    """Fetch all stored target sources from SQLite database."""
+    path = _resolve_db_path(db_path)
+    results = []
+    try:
+        with get_connection(path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT url_or_id FROM sources ORDER BY id ASC")
+            for row in cursor.fetchall():
+                results.append(row["url_or_id"])
+    except sqlite3.Error:
+        pass
+    return results
 
 
 if __name__ == "__main__":
