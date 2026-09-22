@@ -11,6 +11,7 @@ class BaseCollector(ABC):
         self,
         source_id: str,
         limit: int = 100,
+        **kwargs,
     ) -> list[FacebookPost]:
         """Fetch posts from the given source or group identifier.
 

@@ -23,6 +23,14 @@ CREATE TABLE IF NOT EXISTS leads (
     post_time TEXT,
     post_url TEXT NOT NULL UNIQUE,
     content TEXT,
+    phone TEXT,
+    zalo_url TEXT,
+    min_budget INTEGER,
+    max_budget INTEGER,
+    budget_unit TEXT,
+    subject TEXT,
+    grade TEXT,
+    lead_type TEXT,
     collected_at TEXT NOT NULL
 );
 
@@ -32,6 +40,9 @@ CREATE TABLE IF NOT EXISTS sources (
     name TEXT,
     added_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_leads_post_url ON leads(post_url);
+CREATE INDEX IF NOT EXISTS idx_leads_collected_at ON leads(collected_at);
 """
 
 
@@ -54,23 +65,36 @@ def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
 
 
 def init_db(db_path: str | Path | None = None) -> None:
-    """Initialize database tables and indexes if they do not exist.
-
-    Args:
-        db_path: Optional custom path to database file.
-    """
+    """Initialize database tables and indexes if they do not exist."""
     path = _resolve_db_path(db_path)
     try:
         with get_connection(path) as conn:
             conn.executescript(SCHEMA_SQL)
-            # Automatic schema migration for content column if database already existed
+            # Automatic schema migration for new columns
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(leads)")
             existing_columns = {row["name"] for row in cursor.fetchall()}
-            if "content" not in existing_columns:
-                cursor.execute("ALTER TABLE leads ADD COLUMN content TEXT")
-                conn.commit()
-                logger.info("Migrated SQLite schema: added 'content' column to leads table.")
+            
+            new_cols = {
+                "content": "TEXT",
+                "phone": "TEXT",
+                "zalo_url": "TEXT",
+                "min_budget": "INTEGER",
+                "max_budget": "INTEGER",
+                "budget_unit": "TEXT",
+                "subject": "TEXT",
+                "grade": "TEXT",
+                "lead_type": "TEXT",
+            }
+            for col_name, col_type in new_cols.items():
+                if col_name not in existing_columns:
+                    cursor.execute(f"ALTER TABLE leads ADD COLUMN {col_name} {col_type}")
+                    logger.info(f"Migrated SQLite schema: added '{col_name}' column to leads table.")
+
+            # Ensure indices exist even after migrations
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_leads_post_url ON leads(post_url)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_leads_collected_at ON leads(collected_at)")
+            conn.commit()
         logger.info(f"Database initialized successfully at {path}")
     except sqlite3.Error as e:
         logger.error(f"Failed to initialize database at {path}: {e}")
@@ -78,15 +102,7 @@ def init_db(db_path: str | Path | None = None) -> None:
 
 
 def lead_exists(post_url: str, db_path: str | Path | None = None) -> bool:
-    """Check if a lead with given post_url already exists in the database.
-
-    Args:
-        post_url: Post URL to check.
-        db_path: Optional custom path to database file.
-
-    Returns:
-        True if post_url is already recorded, False otherwise.
-    """
+    """Check if a lead with given post_url already exists in the database."""
     if not post_url:
         return False
     path = _resolve_db_path(db_path)
@@ -100,23 +116,42 @@ def lead_exists(post_url: str, db_path: str | Path | None = None) -> bool:
         return False
 
 
+def filter_new_post_urls(urls: Sequence[str], db_path: str | Path | None = None) -> set[str]:
+    """Given a sequence of post URLs, return the set of URLs that do NOT exist in the database."""
+    if not urls:
+        return set()
+    unique_urls = list(dict.fromkeys(u.strip() for u in urls if u and u.strip()))
+    if not unique_urls:
+        return set()
+
+    path = _resolve_db_path(db_path)
+    existing: set[str] = set()
+    chunk_size = 400
+    try:
+        with get_connection(path) as conn:
+            cursor = conn.cursor()
+            for i in range(0, len(unique_urls), chunk_size):
+                chunk = unique_urls[i : i + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                cursor.execute(f"SELECT post_url FROM leads WHERE post_url IN ({placeholders})", chunk)
+                for row in cursor.fetchall():
+                    existing.add(row[0])
+    except sqlite3.Error as e:
+        logger.error(f"Error filtering post URLs: {e}")
+        return set(unique_urls)
+
+    return set(unique_urls) - existing
+
+
 def insert_lead(lead: Lead, db_path: str | Path | None = None) -> bool:
-    """Insert a new lead into SQLite database.
-
-    If post_url already exists (due to UNIQUE constraint), insertion is ignored
-    and returns False.
-
-    Args:
-        lead: Lead instance to insert.
-        db_path: Optional custom path to database file.
-
-    Returns:
-        True if inserted successfully, False if duplicate or failed.
-    """
+    """Insert a new lead into SQLite database."""
     path = _resolve_db_path(db_path)
     insert_sql = """
-    INSERT INTO leads (group_name, keyword, author, post_time, post_url, content, collected_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO leads (
+        group_name, keyword, author, post_time, post_url, content,
+        phone, zalo_url, min_budget, max_budget, budget_unit, subject, grade, lead_type, collected_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     try:
         with get_connection(path) as conn:
@@ -130,13 +165,20 @@ def insert_lead(lead: Lead, db_path: str | Path | None = None) -> bool:
                     lead.post_time.isoformat(),
                     lead.post_url,
                     lead.content,
+                    lead.phone,
+                    lead.zalo_url,
+                    lead.min_budget,
+                    lead.max_budget,
+                    lead.budget_unit,
+                    lead.subject,
+                    lead.grade,
+                    lead.lead_type,
                     lead.collected_at.isoformat(),
                 ),
             )
             conn.commit()
             return True
     except sqlite3.IntegrityError:
-        # Unique constraint on post_url triggered
         logger.debug(f"Lead already exists (duplicate post_url): {lead.post_url}")
         return False
     except sqlite3.Error as e:
@@ -144,24 +186,64 @@ def insert_lead(lead: Lead, db_path: str | Path | None = None) -> bool:
         return False
 
 
-def get_all_leads(db_path: str | Path | None = None) -> list[Lead]:
-    """Retrieve all leads stored in the database.
-
-    Args:
-        db_path: Optional custom path to database file.
-
-    Returns:
-        List of Lead model instances ordered by id DESC.
+def insert_leads_batch(leads: list[Lead], db_path: str | Path | None = None) -> int:
+    """Insert a list of leads in a single batch transaction. Returns number of inserted leads."""
+    if not leads:
+        return 0
+    path = _resolve_db_path(db_path)
+    insert_sql = """
+    INSERT OR IGNORE INTO leads (
+        group_name, keyword, author, post_time, post_url, content,
+        phone, zalo_url, min_budget, max_budget, budget_unit, subject, grade, lead_type, collected_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
+    inserted = 0
+    try:
+        with get_connection(path) as conn:
+            cursor = conn.cursor()
+            initial_changes = conn.total_changes
+            for lead in leads:
+                cursor.execute(
+                    insert_sql,
+                    (
+                        lead.group_name,
+                        lead.keyword,
+                        lead.author,
+                        lead.post_time.isoformat(),
+                        lead.post_url,
+                        lead.content,
+                        lead.phone,
+                        lead.zalo_url,
+                        lead.min_budget,
+                        lead.max_budget,
+                        lead.budget_unit,
+                        lead.subject,
+                        lead.grade,
+                        lead.lead_type,
+                        lead.collected_at.isoformat(),
+                    ),
+                )
+            conn.commit()
+            inserted = conn.total_changes - initial_changes
+            return inserted
+    except sqlite3.Error as e:
+        logger.error(f"Failed to batch insert leads: {e}")
+        return inserted
+
+
+def get_all_leads(db_path: str | Path | None = None) -> list[Lead]:
+    """Retrieve all leads stored in the database."""
     path = _resolve_db_path(db_path)
     leads: list[Lead] = []
     try:
         with get_connection(path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT group_name, keyword, author, post_time, post_url, content, collected_at FROM leads ORDER BY id DESC"
+                "SELECT * FROM leads ORDER BY id DESC"
             )
             for row in cursor.fetchall():
+                row_keys = row.keys()
                 leads.append(
                     Lead(
                         group_name=row["group_name"],
@@ -169,7 +251,15 @@ def get_all_leads(db_path: str | Path | None = None) -> list[Lead]:
                         author=row["author"] or "Unknown",
                         post_time=datetime.fromisoformat(row["post_time"]),
                         post_url=row["post_url"],
-                        content=row["content"] or "" if "content" in row.keys() else "",
+                        content=row["content"] if "content" in row_keys and row["content"] else "",
+                        phone=row["phone"] if "phone" in row_keys else None,
+                        zalo_url=row["zalo_url"] if "zalo_url" in row_keys else None,
+                        min_budget=row["min_budget"] if "min_budget" in row_keys else None,
+                        max_budget=row["max_budget"] if "max_budget" in row_keys else None,
+                        budget_unit=row["budget_unit"] if "budget_unit" in row_keys else None,
+                        subject=row["subject"] if "subject" in row_keys and row["subject"] else "Khác",
+                        grade=row["grade"] if "grade" in row_keys and row["grade"] else "Khác",
+                        lead_type=row["lead_type"] if "lead_type" in row_keys and row["lead_type"] else "Phụ huynh / Học sinh",
                         collected_at=datetime.fromisoformat(row["collected_at"]),
                     )
                 )
@@ -194,9 +284,9 @@ def load_sources_from_file(sources_file: str | Path | None = None) -> list[str]:
     sources = []
     with target_path.open("r", encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                sources.append(line)
+            clean_line = line.split("#")[0].strip()
+            if clean_line:
+                sources.append(clean_line)
 
     return sources
 

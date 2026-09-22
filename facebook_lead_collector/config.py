@@ -1,13 +1,24 @@
-"""Configuration management using python-dotenv and Pydantic."""
 from functools import lru_cache
 import json
 import os
 from pathlib import Path
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+import sys
 
 # Base directory for the project
 BASE_DIR = Path(__file__).resolve().parent
+
+# Auto-detect & inject project virtualenv (.venv) if system global python is used
+try:
+    import dotenv
+except ImportError:
+    for venv_path in (BASE_DIR / ".venv", BASE_DIR.parent / ".venv"):
+        sites = list(venv_path.glob("lib/python*/site-packages"))
+        if sites:
+            sys.path.insert(0, str(sites[0]))
+            break
+
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 
 def _default_chrome_user_data() -> str:

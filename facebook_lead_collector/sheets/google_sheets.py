@@ -6,9 +6,16 @@ import sys
 from typing import Any
 
 # Ensure project root is in sys.path when running this file directly from an IDE
-_project_root = str(Path(__file__).resolve().parent.parent)
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+for venv_path in (_project_root / ".venv", _project_root.parent / ".venv"):
+    sites = list(venv_path.glob("lib/python*/site-packages"))
+    if sites:
+        if str(sites[0]) not in sys.path:
+            sys.path.insert(0, str(sites[0]))
+        break
 
 from config import get_settings
 from models.post import Lead
@@ -20,13 +27,19 @@ SHEET_SCOPES = [
 ]
 
 SHEET_HEADERS = [
-    "Link bài viết",
-    "Tên người đăng",
-    "Thời gian",
-    "Nội dung bài đăng",
-    "Nhóm",
-    "Từ khóa",
-    "Thời gian thu thập",
+    "💬 Chat Zalo Direct",
+    "Số Điện Thoại",
+    "Môn Học",
+    "Khối Lớp",
+    "Ngân Sách (VND)",
+    "🔗 Link Bài FB",
+    "Tên Người Đăng",
+    "Thời Gian Đăng",
+    "Nội Dung Bài Đăng",
+    "Nhóm Facebook",
+    "Từ Khóa",
+    "Thời Gian Thu Thập",
+    "Phân Loại",
 ]
 
 
@@ -107,17 +120,17 @@ class GoogleSheetsClient:
                         f"Worksheet '{self.worksheet_name}' not found. Creating it..."
                     )
                     self.worksheet = self.spreadsheet.add_worksheet(
-                        title=self.worksheet_name, rows="1000", cols="10"
+                        title=self.worksheet_name, rows="1000", cols="15"
                     )
 
             # Check and initialize headers if empty or outdated
             headers = self.worksheet.row_values(1)
             if not headers:
                 logger.info("Sheet header is empty. Initializing column headers...")
-                self.worksheet.update([SHEET_HEADERS], "A1:G1")
+                self.worksheet.update([SHEET_HEADERS], "A1:M1")
             elif headers != SHEET_HEADERS:
                 logger.info("Updating worksheet headers to match required column structure...")
-                self.worksheet.update([SHEET_HEADERS], "A1:G1")
+                self.worksheet.update([SHEET_HEADERS], "A1:M1")
 
             # Pre-cache existing post URLs to prevent duplicate writes
             self._load_existing_urls()
@@ -141,9 +154,11 @@ class GoogleSheetsClient:
             return
 
         try:
-            url_col_idx = 1
+            url_col_idx = 6
             headers = self.worksheet.row_values(1)
-            if "Link bài viết" in headers:
+            if "🔗 Link Bài FB" in headers:
+                url_col_idx = headers.index("🔗 Link Bài FB") + 1
+            elif "Link bài viết" in headers:
                 url_col_idx = headers.index("Link bài viết") + 1
             elif "Post URL" in headers:
                 url_col_idx = headers.index("Post URL") + 1
