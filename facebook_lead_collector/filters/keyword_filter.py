@@ -65,6 +65,14 @@ TUTOR_SUPPLY_KEYWORDS: list[str] = [
     "chiêu sinh",
     "nhận học viên",
     "tuyển học viên",
+    "nhận thêm học viên",
+    "nhận thêm học sinh",
+    "đang nhận thêm học viên",
+    "đang nhận thêm học sinh",
+    "có lớp giao tiếp",
+    "luyện ielts",
+    "ôn chứng chỉ",
+    "kèm học sinh lớp",
     "khai giảng",
     "mở lớp",
     # Gia sư tự chào mời nhận dạy kèm / tìm học sinh
@@ -197,13 +205,19 @@ SPAM_NEGATIVE_KEYWORDS: list[str] = [
 
 NEGATIVE_KEYWORDS: list[str] = TUTOR_SUPPLY_KEYWORDS + SPAM_NEGATIVE_KEYWORDS
 
+TUTOR_SUPPLY_PATTERNS: list[re.Pattern] = [
+    re.compile(r"\b(?:cô|thầy|em|mình|cháu)\s+đang\s+nhận\s+(?:thêm\s+)?(?:học\s+viên|học\s+sinh|lớp|dạy)\b", re.IGNORECASE),
+    re.compile(r"\bnhận\s+thêm\s+(?:học\s+viên|học\s+sinh|lớp)\b", re.IGNORECASE),
+    re.compile(r"\b(?:có\s+lớp\s+giao\s+tiếp|luyện\s+ielts|ôn\s+chứng\s+chỉ)\b", re.IGNORECASE),
+    re.compile(r"\bchuyên\s+(?:nhận\s+dạy|lấy\s+lại\s+gốc|kèm\s+1[- ]1)\b", re.IGNORECASE),
+]
+
 # Từ khóa thể hiện nhu cầu TUYỂN / TÌM GIA SƯ
 EXPLICIT_DEMAND_KEYWORDS: list[str] = [
     "tuyển gia sư",
     "cần tuyển gia sư",
     "tuyển dụng gia sư",
     "tuyển giáo viên",
-    "tuyển trợ giảng",
     "tuyển sinh viên dạy",
     "tìm gia sư",
     "cần gia sư",
@@ -213,9 +227,9 @@ EXPLICIT_DEMAND_KEYWORDS: list[str] = [
     "tìm dạy kèm",
     "cần dạy kèm",
     "tìm gia sư tphcm",
-    "tìm gia sư hà nội",
+    "tìm gia sư bình thạnh",
     "cần gia sư tphcm",
-    "cần gia sư hà nội",
+    "cần gia sư bình thạnh",
     "gia sư cho bé",
     "gia sư cho con",
     "gia sư cho cháu",
@@ -228,18 +242,6 @@ EXPLICIT_DEMAND_KEYWORDS: list[str] = [
     "mẹ cần tìm gia sư",
     "ba cần tìm gia sư",
     "bố cần tìm gia sư",
-    "mã lớp",
-    "mã số lớp",
-    "suất 1",
-    "suất 2",
-    "suất 3",
-    "suất 4",
-    "nhận lớp",
-    "giao lớp",
-    "phí nhận lớp",
-    "phí nhận",
-    "thu nhập:",
-    "ca làm:",
 ]
 
 
@@ -253,7 +255,11 @@ def is_tutor_or_broker_post(text: str, author: str | None = None) -> bool:
     if not text:
         return False
     cleaned_text = normalize_text(text).lower()
-    return any(neg in cleaned_text for neg in NEGATIVE_KEYWORDS)
+    if any(neg in cleaned_text for neg in NEGATIVE_KEYWORDS):
+        return True
+    if any(p.search(cleaned_text) for p in TUTOR_SUPPLY_PATTERNS):
+        return True
+    return False
 
 
 def find_matching_keywords(
@@ -284,6 +290,9 @@ def find_matching_keywords(
     # 1. Reject pure tutor self-promotion seeking students or off-topic spam
     for neg_kw in NEGATIVE_KEYWORDS:
         if neg_kw in cleaned_text:
+            return []
+    for pattern in TUTOR_SUPPLY_PATTERNS:
+        if pattern.search(cleaned_text):
             return []
 
     # 2. Demand intent check: Must express seeking or recruiting a tutor

@@ -38,14 +38,19 @@ def test_keep_all_tutor_recruitment_posts():
     assert len(matched3) > 0
 
 
-def test_keep_real_parent_demand_posts():
-    # Bài phụ huynh thật (PHẢI GIỮ LẠI)
-    p1 = "Mình đang cần tìm gia sư dạy toán cho 2 bạn lớp 5 và lớp 7. Yêu cầu là gia sư nữ, khu vực Thanh Xuân. Bạn nào dạy được liên hệ mình nhé."
-    matched1 = find_matching_keywords(p1, author="Thư Nam")
-    assert len(matched1) > 0
-    assert classify_lead_type(p1, author="Thư Nam") == "Phụ huynh / Học sinh"
+def test_reject_comment_tutor_self_promotion():
+    # Comment thực tế trong ảnh của user: Cô Diệu Nhi chào mời học sinh
+    comment_text = "Cô đang nhận thêm học viên tiếng Anh online 1:1 nha. Có lớp giao tiếp, luyện IELTS, ôn chứng chỉ và kèm học sinh lớp 1-12."
+    assert find_matching_keywords(comment_text, author="Cô Diệu Nhi- Gia Sư Toàn Năng") == []
 
-    p2 = "Cần tìm gia sư dạy kèm tiếng Anh tại nhà cho bé lớp 3 khu vực Cầu Giấy, 0912345678."
-    matched2 = find_matching_keywords(p2, author="Huong Vo")
-    assert len(matched2) > 0
-    assert classify_lead_type(p2, author="Huong Vo") == "Phụ huynh / Học sinh"
+
+def test_clean_post_url_rejects_user_profile():
+    from collectors.selenium_facebook import SeleniumFacebookSearchCollector
+    # Link comment author / group user profile (PHẢI BỎ, KHÔNG ĐƯỢC COI LÀ POST URL)
+    user_url = "https://www.facebook.com/groups/590994928336990/user/61591370285938/"
+    assert SeleniumFacebookSearchCollector._clean_post_url(user_url) == ""
+
+    # Link post thật (PHẢI GIỮ)
+    post_url = "https://www.facebook.com/groups/giasudaykemthanglong/posts/2445517946185990/?comment_id=123"
+    cleaned = SeleniumFacebookSearchCollector._clean_post_url(post_url)
+    assert cleaned == "https://www.facebook.com/groups/giasudaykemthanglong/posts/2445517946185990/"

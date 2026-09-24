@@ -40,8 +40,8 @@ def test_sheet_row_13_columns():
     )
 
     row = lead.to_sheet_row()
-    assert len(row) == 13, f"Expected 13 columns, got {len(row)}"
-    assert len(SHEET_HEADERS) == 13
+    assert len(row) == 15, f"Expected 15 columns, got {len(row)}"
+    assert len(SHEET_HEADERS) == 15
 
     # Column A: Zalo Direct hyperlink formula
     assert row[0] == '=HYPERLINK("https://zalo.me/0987654321"; "💬 Chat Zalo")'
@@ -68,6 +68,8 @@ def test_sheet_row_13_columns():
 def test_mock_batch_append_leads():
     client = GoogleSheetsClient()
     mock_worksheet = MagicMock()
+    mock_worksheet.get_all_values.return_value = [["header1"]]
+    mock_worksheet.row_count = 1000
     client.worksheet = mock_worksheet
     client.is_connected = True
 
@@ -88,18 +90,20 @@ def test_mock_batch_append_leads():
     # Test batch append
     appended = client.append_leads(leads)
     assert appended == 10
-    assert mock_worksheet.append_rows.call_count == 1
+    assert mock_worksheet.update.call_count == 1
 
-    # Verify that the call passed all 10 rows with USER_ENTERED option
-    call_args = mock_worksheet.append_rows.call_args
+    # Verify that the call passed all 10 rows with USER_ENTERED option to A2
+    call_args = mock_worksheet.update.call_args
     rows_passed = call_args[0][0]
+    target_range = call_args[0][1]
     assert len(rows_passed) == 10
+    assert target_range == "A2"
     assert call_args[1].get("value_input_option") == "USER_ENTERED"
 
     # Appending duplicate leads should be filtered out by client cache
     appended_again = client.append_leads(leads)
     assert appended_again == 0
-    assert mock_worksheet.append_rows.call_count == 1  # No extra API call made
+    assert mock_worksheet.update.call_count == 1  # No extra API call made
 
     print("✓ Google Sheets batch append test passed successfully!")
 

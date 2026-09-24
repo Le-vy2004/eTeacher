@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS leads (
     subject TEXT,
     grade TEXT,
     lead_type TEXT,
+    friend_status TEXT,
+    friend_requested_at TEXT,
     collected_at TEXT NOT NULL
 );
 
@@ -85,6 +87,8 @@ def init_db(db_path: str | Path | None = None) -> None:
                 "subject": "TEXT",
                 "grade": "TEXT",
                 "lead_type": "TEXT",
+                "friend_status": "TEXT",
+                "friend_requested_at": "TEXT",
             }
             for col_name, col_type in new_cols.items():
                 if col_name not in existing_columns:
@@ -276,6 +280,17 @@ def load_sources_from_file(sources_file: str | Path | None = None) -> list[str]:
         target_path = Path(sources_file)
 
     if not target_path.exists():
+        # Check if singular or plural counterpart exists
+        alt_names = [
+            target_path.parent / (target_path.stem + "s" + target_path.suffix),
+            target_path.parent / (target_path.stem[:-1] + target_path.suffix) if target_path.stem.endswith("s") else None,
+        ]
+        for alt in alt_names:
+            if alt and alt.exists():
+                target_path = alt
+                break
+
+    if not target_path.exists():
         logger.warning(f"Sources file not found at '{target_path}'. Creating empty template...")
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text("# Danh sách các trang/nhóm Facebook cần quét (mỗi dòng 1 URL)\n", encoding="utf-8")
@@ -322,6 +337,56 @@ def get_sources_from_db(db_path: str | Path | None = None) -> list[str]:
     except sqlite3.Error:
         pass
     return results
+
+
+def update_lead_friend_status(
+    post_url: str,
+    status: str,
+    requested_at: str | None = None,
+    db_path: str | Path | None = None,
+) -> bool:
+    """Update the friend request status of a lead by post_url."""
+    if not post_url:
+        return False
+    path = _resolve_db_path(db_path)
+    ts = requested_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sql = "UPDATE leads SET friend_status = ?, friend_requested_at = ? WHERE post_url = ?"
+    try:
+        with get_connection(path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, (status, ts, post_url))
+            conn.commit()
+            return cursor.rowcount > 0
+    except sqlite3.Error as e:
+        logger.error(f"Failed to update friend status for {post_url}: {e}")
+        return False
+
+
+def get_leads_needing_friend_request(
+    limit: int = 50,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """Get leads that have not yet had a friend request sent or completed."""
+    path = _resolve_db_path(db_path)
+    results = []
+    sql = """
+        SELECT id, author, post_url, group_name, content, friend_status, friend_requested_at
+        FROM leads
+        WHERE friend_status IS NULL 
+           OR friend_status NOT IN ('Đã gửi kết bạn', 'Đã là bạn bè', 'Đã gửi trước đó', 'Tài khoản ẩn danh (Bỏ qua)')
+        ORDER BY id DESC
+        LIMIT ?
+    """
+    try:
+        with get_connection(path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, (limit,))
+            for row in cursor.fetchall():
+                results.append(dict(row))
+    except sqlite3.Error as e:
+        logger.error(f"Error fetching leads for friend request: {e}")
+    return results
+
 
 
 

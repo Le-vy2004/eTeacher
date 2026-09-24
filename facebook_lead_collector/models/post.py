@@ -40,6 +40,8 @@ class Lead(BaseModel):
     subject: str = Field(default="Khác", description="Extracted subject taxonomy")
     grade: str = Field(default="Khác", description="Extracted grade taxonomy")
     lead_type: str = Field(default="Phụ huynh / Học sinh", description="Lead classification type")
+    friend_status: str | None = Field(default=None, description="Trạng thái kết bạn Facebook")
+    friend_requested_at: datetime | None = Field(default=None, description="Thời gian gửi lời mời")
     collected_at: datetime = Field(
         default_factory=datetime.now,
         description="Timestamp when lead was collected",
@@ -63,6 +65,11 @@ class Lead(BaseModel):
         )
         zalo_formula = f'=HYPERLINK("{self.zalo_url}"{formula_sep} "💬 Chat Zalo")' if self.zalo_url else "Không có SĐT"
         fb_link_formula = f'=HYPERLINK("{self.post_url}"{formula_sep} "🔗 Xem bài viết")'
+        friend_req_time = (
+            self.friend_requested_at.strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(self.friend_requested_at, datetime)
+            else (str(self.friend_requested_at) if self.friend_requested_at else "")
+        )
 
         return [
             zalo_formula,
@@ -78,6 +85,8 @@ class Lead(BaseModel):
             self.keyword,
             self.collected_at.strftime("%Y-%m-%d %H:%M:%S"),
             self.lead_type,
+            self.friend_status or "",
+            friend_req_time,
         ]
 
 

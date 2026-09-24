@@ -150,18 +150,31 @@ class SeleniumFacebookSearchCollector(BaseCollector):
         options.add_argument("--no-default-browser-check")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
-        driver = webdriver.Chrome(options=options)
+        try:
+            driver = webdriver.Chrome(options=options)
+        except Exception as e:
+            err_text = str(e).lower()
+            if "crashed" in err_text or "devtoolsactiveport" in err_text or "session not created" in err_text:
+                logger.error(
+                    "❌ KHÔNG THỂ KHỞI ĐỘNG CHROME: Thư mục profile đang bị khóa!\n"
+                    f"Nguyên nhân: Đang có một tiến trình Chrome/Python khác đang mở thư mục profile '{self.user_data_dir}'.\n"
+                    "👉 Cách xử lý: Vui lòng đóng cửa sổ terminal hoặc trình duyệt Chrome đang chạy profile này trước khi khởi động lại."
+                )
+            raise e
         driver.set_page_load_timeout(30)
         return driver
 
     @staticmethod
-    def _parse_time(raw_time: str) -> datetime:
+    def _parse_time(raw_time: str) -> datetime | None:
         from utils.date_parser import parse_facebook_time
-        return parse_facebook_time(raw_time)
+        return parse_facebook_time(raw_time, fallback_to_now=False)
 
     @staticmethod
     def _clean_post_url(raw_url: str) -> str:
-        """Sanitize Facebook URL by stripping tracking parameters while keeping critical query IDs."""
+        """Sanitize Facebook URL by stripping tracking parameters while keeping critical query IDs.
+
+        Strictly rejects member profile URLs (/user/, /profile.php) and hashtag links.
+        """
         if not raw_url:
             return ""
         try:
@@ -169,6 +182,12 @@ class SeleniumFacebookSearchCollector(BaseCollector):
             import urllib.parse
             parsed = urllib.parse.urlparse(raw_url)
             path = parsed.path.rstrip("/")
+            lower_path = path.lower()
+
+            # Reject user profile links and hashtags
+            if "/user/" in lower_path or "profile.php" in lower_path or "/hashtag/" in lower_path:
+                return ""
+
             if "/posts/" in path:
                 base, post_id = path.rsplit("/posts/", 1)
                 clean_id = post_id.split("/")[0].split(",")[0]
@@ -185,13 +204,18 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                 if group_match and pid:
                     return f"https://www.facebook.com/groups/{group_match.group(1)}/posts/{pid}/"
 
-            important_keys = ["story_fbid", "id", "fbid", "set"]
-            clean_qs = {k: qs[k][0].split(",")[0] for k in important_keys if k in qs and qs[k]}
-            if clean_qs:
-                return f"https://www.facebook.com{path}?{urllib.parse.urlencode(clean_qs)}"
-            return f"https://www.facebook.com{path}"
+            if "story_fbid" in qs and qs["story_fbid"]:
+                fbid = qs["story_fbid"][0].split(",")[0]
+                group_match = re.search(r"/groups/([^/]+)", path)
+                if group_match and fbid:
+                    return f"https://www.facebook.com/groups/{group_match.group(1)}/posts/{fbid}/"
+                id_val = qs.get("id", [""])[0]
+                return f"https://www.facebook.com{path}?story_fbid={fbid}" + (f"&id={id_val}" if id_val else "")
+
+            # If it's a bare group URL or not a post URL, reject
+            return ""
         except Exception:
-            return raw_url.split("?")[0].split(",")[0]
+            return ""
 
     @staticmethod
     def _has_logged_in_session(driver) -> bool:
@@ -238,12 +262,15 @@ class SeleniumFacebookSearchCollector(BaseCollector):
 
         const isPostLink = (href) => {
             if (!href) return false;
+            const lower = href.toLowerCase();
+            if (lower.includes('/user/') || lower.includes('profile.php') || lower.includes('/hashtag/') || lower.includes('/events/')) {
+                return false;
+            }
             return (
-                href.includes('/posts/') ||
-                href.includes('/permalink/') ||
-                href.includes('story_fbid=') ||
-                href.includes('multi_permalinks=') ||
-                (href.includes('/groups/') && href.includes('/user/'))
+                lower.includes('/posts/') ||
+                lower.includes('/permalink/') ||
+                lower.includes('story_fbid=') ||
+                lower.includes('multi_permalinks=')
             );
         };
 
@@ -288,109 +315,59 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                     return u.origin + path + '?story_fbid=' + fbid + (id ? '&id=' + id : '');
                 }
 
-                if (path.includes('/groups/') && path.includes('/user/')) {
-                    const groupUserMatch = path.match(/\/groups\/([^\/]+)\/user\/([^\/]+)/);
-                    if (groupUserMatch) {
-                        return `https://www.facebook.com/groups/${groupUserMatch[1]}/user/${groupUserMatch[2]}/`;
-                    }
-                }
-
                 return '';
             } catch(e) {
                 return '';
             }
         };
 
-        const isCommentEl = (el) => {
-            if (!el) return false;
-            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-            if (aria.includes('bình luận') || aria.includes('comment') || 
-                aria.includes('phản hồi') || aria.includes('reply') ||
-                aria.includes('viết bình luận') || aria.includes('cảm xúc') ||
-                aria.includes('thích') || aria.includes('chia sẻ')) {
-                return true;
-            }
-            if (el.closest('div[role="article"][aria-label*="bình luận" i]') ||
-                el.closest('div[role="article"][aria-label*="comment" i]') ||
-                el.closest('div[role="article"][aria-label*="phản hồi" i]') ||
-                el.closest('div[role="article"][aria-label*="reply" i]')) {
-                return true;
-            }
-            if (el.closest('form') || el.closest('ul')) return true;
-            return false;
-        };
-
-        // 2. Locate post container elements (strictly excluding comment articles)
+        // 2. Locate post container elements
         const candidateCards = [];
         const seenElements = new Set();
 
-        // Strategy A: Elements with role="article" that are NOT comments
-        document.querySelectorAll('div[role="article"]').forEach(el => {
-            if (!seenElements.has(el) && !isCommentEl(el)) {
-                seenElements.add(el);
-                candidateCards.push(el);
-            }
-        });
-
-        // Strategy B: Direct children of feed
+        // Strategy A: Direct children of div[role="feed"]
         document.querySelectorAll('div[role="feed"] > div').forEach(el => {
-            if (!seenElements.has(el) && !isCommentEl(el) && (el.innerText || '').trim().length > 30) {
+            const txt = (el.innerText || '').trim();
+            if (txt.length > 30 && !seenElements.has(el)) {
                 seenElements.add(el);
                 candidateCards.push(el);
             }
         });
 
-        // Strategy C: Ancestors of post links
-        document.querySelectorAll('a[href]').forEach(a => {
-            if (isCommentEl(a)) return;
-            const href = a.getAttribute('href') || '';
-            if (isPostLink(href)) {
-                let parent = a.parentElement;
-                let depth = 0;
-                let chosen = null;
-                while (parent && depth < 12 && parent !== document.body) {
-                    if (isCommentEl(parent)) {
-                        chosen = null;
-                        break;
-                    }
-                    if (parent.getAttribute('role') === 'article' && !isCommentEl(parent)) {
-                        chosen = parent;
-                        break;
-                    }
-                    if (parent.parentElement && parent.parentElement.getAttribute('role') === 'feed') {
-                        chosen = parent;
-                        break;
-                    }
-                    const len = (parent.innerText || '').length;
-                    if (len > 40 && len < 8000 && !chosen && !isCommentEl(parent)) {
-                        chosen = parent;
-                    }
-                    parent = parent.parentElement;
-                    depth++;
-                }
-                if (chosen && !seenElements.has(chosen) && !isCommentEl(chosen)) {
-                    seenElements.add(chosen);
-                    candidateCards.push(chosen);
-                }
+        // Strategy B: Top-level elements with role="article"
+        document.querySelectorAll('div[role="article"]').forEach(el => {
+            if (el.parentElement && el.parentElement.closest('div[role="article"]')) return;
+            const txt = (el.innerText || '').trim();
+            if (txt.length > 30 && !seenElements.has(el)) {
+                seenElements.add(el);
+                candidateCards.push(el);
             }
         });
 
-        // Strategy D: Fallback to main text blocks
+        // Strategy C: Ancestors of post links if feed container wasn't found directly
         if (candidateCards.length === 0) {
-            document.querySelectorAll('div[role="main"] div[dir="auto"]').forEach(el => {
-                if (isCommentEl(el)) return;
-                let p = el.parentElement;
-                let depth = 0;
-                while (p && depth < 8 && p !== document.body) {
-                    if (isCommentEl(p)) break;
-                    const txt = (p.innerText || '').trim();
-                    if (txt.length > 50 && txt.length < 6000 && !seenElements.has(p)) {
-                        seenElements.add(p);
-                        candidateCards.push(p);
-                        break;
+            document.querySelectorAll('a[href]').forEach(a => {
+                const href = a.getAttribute('href') || '';
+                if (isPostLink(href)) {
+                    let parent = a.parentElement;
+                    let depth = 0;
+                    let chosen = null;
+                    while (parent && depth < 12 && parent !== document.body) {
+                        if (parent.parentElement && parent.parentElement.getAttribute('role') === 'feed') {
+                            chosen = parent;
+                            break;
+                        }
+                        const len = (parent.innerText || '').length;
+                        if (len > 40 && len < 8000 && !chosen) {
+                            chosen = parent;
+                        }
+                        parent = parent.parentElement;
+                        depth++;
                     }
-                    p = p.parentElement;
-                    depth++;
+                    if (chosen && !seenElements.has(chosen)) {
+                        seenElements.add(chosen);
+                        candidateCards.push(chosen);
+                    }
                 }
             });
         }
@@ -402,17 +379,16 @@ class SeleniumFacebookSearchCollector(BaseCollector):
         for (const card of candidateCards) {
             if (results.length >= maxLimit) break;
 
-            const allLinks = Array.from(card.querySelectorAll('a[href]')).filter(a => !isCommentEl(a));
+            // 1. Find post URL from any post link inside card
             let postUrl = '';
+            const allLinks = Array.from(card.querySelectorAll('a[href]'));
             for (const a of allLinks) {
                 const href = a.getAttribute('href') || a.href || '';
                 if (isPostLink(href)) {
                     const cleaned = cleanUrl(href);
                     if (cleaned) {
                         postUrl = cleaned;
-                        if (cleaned.includes('/posts/') || cleaned.includes('/permalink/')) {
-                            break;
-                        }
+                        break;
                     }
                 }
             }
@@ -425,54 +401,37 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                 continue;
             }
 
-            // Extract message content ONLY from main post body (stripping comments entirely)
+            // 2. Extract content from main post (strictly excluding comments & toolbar)
             let content = '';
-
-            // Priority 1: Dedicated post message preview containers
-            const previewEls = Array.from(card.querySelectorAll('div[data-ad-preview="message"], div[data-ad-comet-preview="message"]'));
-            for (const p of previewEls) {
-                if (isCommentEl(p)) continue;
-                const txt = (p.innerText || '').trim();
-                if (txt.length > 20) {
-                    content = txt;
-                    break;
-                }
+            const previewEl = card.querySelector('div[data-ad-preview="message"], div[data-ad-comet-preview="message"]');
+            if (previewEl) {
+                content = (previewEl.innerText || '').trim();
             }
 
-            // Priority 2: Clone card and sanitize by pruning comments, reply trees, action bars and input forms
             if (!content || content.length < 15) {
                 const clone = card.cloneNode(true);
-
-                // Remove comments
-                clone.querySelectorAll('div[role="article"]').forEach(a => {
-                    if (isCommentEl(a)) a.remove();
-                });
-
-                // Remove any element with comment / reaction aria-label
-                clone.querySelectorAll('[aria-label]').forEach(el => {
-                    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                    if (aria.includes('bình luận') || aria.includes('comment') || 
-                        aria.includes('phản hồi') || aria.includes('reply') ||
-                        aria.includes('viết bình luận') || aria.includes('cảm xúc') ||
-                        aria.includes('thích') || aria.includes('chia sẻ')) {
-                        el.remove();
+                // Prune toolbar and all subsequent elements (comment section)
+                const toolbar = clone.querySelector('div[role="toolbar"]');
+                if (toolbar) {
+                    let next = toolbar;
+                    while (next) {
+                        const toRemove = next;
+                        next = next.nextElementSibling;
+                        toRemove.remove();
                     }
-                });
-
-                // Remove comment input form, textareas, uls
-                clone.querySelectorAll('form, ul, input, textarea').forEach(e => e.remove());
-
-                // Remove interaction action buttons
+                    toolbar.remove();
+                }
+                // Prune comment forms, lists, comment articles, and comment boxes
+                clone.querySelectorAll('div[role="article"], form, ul, ol, input, textarea, [aria-label*="bình luận" i], [aria-label*="comment" i]').forEach(e => e.remove());
                 clone.querySelectorAll('div[role="button"], span[role="button"]').forEach(b => {
                     const bText = (b.innerText || '').trim().toLowerCase();
-                    if (['thích', 'like', 'bình luận', 'comment', 'chia sẻ', 'share', 'gửi'].includes(bText)) {
+                    if (['thích', 'like', 'bình luận', 'comment', 'chia sẻ', 'share', 'gửi', 'phù hợp nhất', 'tất cả bình luận'].includes(bText)) {
                         b.remove();
                     }
                 });
 
                 const segments = [];
                 clone.querySelectorAll('div[dir="auto"], span[dir="auto"]').forEach(el => {
-                    if (isCommentEl(el)) return;
                     const t = (el.innerText || '').trim();
                     if (t.length > 15 && !segments.some(s => s.includes(t) || t.includes(s))) {
                         segments.push(t);
@@ -484,7 +443,7 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                 } else {
                     const rawText = (clone.innerText || '').trim();
                     const lines = rawText.split('\\n').map(l => l.trim()).filter(Boolean);
-                    const filtered = lines.filter(l => {
+                    content = lines.filter(l => {
                         const lower = l.toLowerCase();
                         return !(
                             lower === 'thích' || lower === 'like' ||
@@ -495,8 +454,7 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                             lower.includes('phù hợp nhất') ||
                             lower.includes('tất cả bình luận')
                         );
-                    });
-                    content = filtered.join('\\n');
+                    }).join('\\n');
                 }
             }
 
@@ -512,17 +470,12 @@ class SeleniumFacebookSearchCollector(BaseCollector):
 
             seenUrls.add(postUrl);
 
-            // Extract author cleanly from header
+            // 3. Extract author cleanly from header
             let author = 'Facebook User';
-            const headings = Array.from(card.querySelectorAll('h2 a, h3 a, h4 a, strong a, a[role="link"] strong, span[dir="auto"] strong, a[role="link"]'));
+            const headings = Array.from(card.querySelectorAll('h2 a, h3 a, h4 a, strong a, a[role="link"] strong, span[dir="auto"] strong, a[role="link"] span[dir="auto"], a[role="link"]'));
             for (const h of headings) {
-                if (isCommentEl(h)) continue;
-                const href = h.getAttribute('href') || (h.closest('a') ? h.closest('a').getAttribute('href') : '');
-                if (href && (href.includes('/groups/') && !href.includes('/user/')) && !href.includes('/profile.php')) {
-                    continue;
-                }
                 const txt = (h.innerText || '').trim();
-                if (txt && txt.length >= 2 && txt.length < 50) {
+                if (txt && txt.length >= 2 && txt.length < 60) {
                     const lower = txt.toLowerCase();
                     if (!lower.includes('bình luận') && 
                         !lower.includes('thành viên') && 
@@ -532,32 +485,68 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                         !lower.includes('thích') &&
                         !lower.includes('chỉ báo trạng thái') &&
                         !lower.includes('đang hoạt động') &&
-                        !lower.includes('phù hợp nhất')) {
-                        author = txt.split('\n')[0].trim();
+                        !lower.includes('phù hợp nhất') &&
+                        !lower.includes('tất cả bình luận') &&
+                        !lower.includes('theo dõi')) {
+                        author = txt.split('\\n')[0].trim();
                         break;
                     }
                 }
             }
 
-            // Extract time
+            // 4. Extract time
             let rawTime = '';
-            const timeEl = card.querySelector('time[datetime], abbr[data-utime]');
-            if (timeEl) {
-                rawTime = timeEl.getAttribute('datetime') || timeEl.getAttribute('data-utime') || (timeEl.innerText || '').trim();
+
+            const extractTimeFromText = (s) => {
+                if (!s || typeof s !== 'string') return '';
+                const trimmed = s.trim();
+                if (!trimmed) return '';
+
+                // Priority 1: Full date formats e.g. "24 tháng 8 lúc 14:00", "15 thg 9", "24/08/2026"
+                const fullDateMatch = trimmed.match(/\b\d{1,2}\s*(?:tháng|thg)\s*\d{1,2}(?:[,\s]+\d{4})?(?:\s*(?:lúc|at)\s*\d{1,2}:\d{1,2})?/i);
+                if (fullDateMatch) return fullDateMatch[0];
+
+                const slashDateMatch = trimmed.match(/\b\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{4})?/i);
+                if (slashDateMatch) return slashDateMatch[0];
+
+                // Priority 2: Relative time e.g. "20 giờ trước", "20 giờ", "vừa xong", "3 ngày", "2 tuần", "1 tháng"
+                const relMatch = trimmed.match(/(?:vừa\s*xong|just\s*now|\b\d+\s*(?:phút|min|giờ|tiếng|hr|h|ngày|day|d|tuần|week|w)(?:\s*trước)?|\b[1-9]\s*(?:tháng|month)(?!\s*\d)|\bhôm\s*qua|yesterday)/i);
+                if (relMatch) return relMatch[0];
+
+                return '';
+            };
+
+            // Strategy 4A: Check all <a> links for post timestamp
+            for (const a of allLinks) {
+                const aria = (a.getAttribute('aria-label') || '').trim();
+                const txt = (a.innerText || '').trim();
+                let found = extractTimeFromText(aria) || extractTimeFromText(txt);
+                if (found) {
+                    rawTime = found;
+                    break;
+                }
             }
+
+            // Strategy 4B: Check span elements in card
             if (!rawTime) {
-                const timeCandidates = card.querySelectorAll('a[href*="/posts/"] span, a[href*="/permalink/"] span, a[role="link"] span, span[dir="auto"]');
-                for (const span of timeCandidates) {
-                    const aria = (span.getAttribute('aria-label') || '').trim();
-                    const txt = (span.innerText || '').trim();
-                    if (aria && (aria.includes('lúc') || aria.includes('ngày') || aria.includes('giờ') || aria.includes('tháng') || aria.includes('hôm qua') || aria.includes('vừa xong') || aria.includes('ago'))) {
-                        rawTime = aria;
+                const allSpans = Array.from(card.querySelectorAll('span'));
+                for (const sp of allSpans) {
+                    const aria = (sp.getAttribute('aria-label') || '').trim();
+                    const txt = (sp.innerText || '').trim();
+                    if (txt.length > 60 && !aria) continue;
+                    let found = extractTimeFromText(aria) || extractTimeFromText(txt);
+                    if (found) {
+                        rawTime = found;
                         break;
                     }
-                    if (txt && /^(vừa xong|\d+\s*(phút|giờ|tiếng|ngày|tuần|tháng|năm|min|hr|d|w|m|y)|hôm qua)/i.test(txt)) {
-                        rawTime = txt;
-                        break;
-                    }
+                }
+            }
+
+            // Strategy 4C: Standard time/abbr tags
+            if (!rawTime) {
+                const timeEl = card.querySelector('time[datetime], abbr[data-utime]');
+                if (timeEl) {
+                    rawTime = timeEl.getAttribute('datetime') || timeEl.getAttribute('data-utime') || (timeEl.innerText || '').trim();
                 }
             }
 
@@ -688,7 +677,13 @@ class SeleniumFacebookSearchCollector(BaseCollector):
         except Exception as e:
             logger.debug(f"Filter tab click non-fatal: {e}")
 
-    def collect_posts(self, source_id: str, limit: int = 100, max_age_days: int = 30) -> list[FacebookPost]:
+    def collect_posts(
+        self,
+        source_id: str,
+        limit: int = 100,
+        max_age_days: int | None = 30,
+        max_age_hours: float | None = None,
+    ) -> list[FacebookPost]:
         """Search and extract Facebook posts matching source_id and keywords."""
         from selenium.common.exceptions import TimeoutException
 
@@ -737,9 +732,13 @@ class SeleniumFacebookSearchCollector(BaseCollector):
 
             if group_url:
                 clean_group_base = group_url.rstrip("/")
-                logger.info(f"Navigating directly to Group feed: {clean_group_base}")
+                if "sorting_setting=" not in clean_group_base and "?" not in clean_group_base:
+                    target_group_url = f"{clean_group_base}?sorting_setting=CHRONOLOGICAL"
+                else:
+                    target_group_url = clean_group_base
+                logger.info(f"Navigating directly to Group feed (Chronological): {target_group_url}")
                 try:
-                    driver.get(clean_group_base)
+                    driver.get(target_group_url)
                     time.sleep(5)
                 except TimeoutException:
                     driver.execute_script("window.stop();")
@@ -751,8 +750,10 @@ class SeleniumFacebookSearchCollector(BaseCollector):
             time.sleep(random.uniform(*self.sleep_range))
 
             # Smart multi-container scrolling with incremental extraction and early stop
-            scroll_count = max(self.scrolls, 3)
-            logger.info(f"Scrolling up to {scroll_count} times to load dynamic feed content...")
+            effective_limit = limit if (limit and limit > 0) else None
+            scroll_count = max(self.scrolls, 40) if effective_limit is None else max(self.scrolls, 3)
+            time_limit_desc = f"{max_age_hours} giờ" if max_age_hours else f"{max_age_days or 30} ngày"
+            logger.info(f"Scrolling up to {scroll_count} times to load dynamic feed content (Lọc bài trong {time_limit_desc})...")
             raw_posts_dict: dict[str, dict[str, Any]] = {}
             stagnant_scrolls = 0
             prev_height = 0
@@ -775,7 +776,7 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                 time.sleep(random.uniform(*self.sleep_range))
 
                 # Incrementally capture posts to prevent virtual DOM recycle loss
-                current_batch = self._extract_posts_js(driver, limit=limit)
+                current_batch = self._extract_posts_js(driver, limit=effective_limit or 9999)
                 new_batch_count = 0
                 for item in current_batch:
                     p_url = item.get("post_url")
@@ -788,14 +789,36 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                     f"Discovered {new_batch_count} new candidate(s) (total: {len(raw_posts_dict)})."
                 )
 
-                if len(raw_posts_dict) >= limit:
-                    logger.info(f"Reached requested limit of {limit} posts early.")
+                if effective_limit and len(raw_posts_dict) >= effective_limit:
+                    logger.info(f"Reached requested limit of {effective_limit} posts early.")
+                    break
+
+                # Real-time check on timestamps of latest discovered posts:
+                # Count consecutive posts at the end of feed that are confirmed older than specified window
+                from utils.date_parser import is_within_time_window
+                old_tail_count = 0
+                for item in reversed(list(raw_posts_dict.values())):
+                    raw_time = item.get("raw_time") or ""
+                    parsed = self._parse_time(raw_time)
+                    if parsed is not None:
+                        if not is_within_time_window(parsed, hours=max_age_hours, days=max_age_days):
+                            old_tail_count += 1
+                        else:
+                            break
+
+                threshold_stop = 3 if (max_age_hours and max_age_hours <= 12) else 5
+                min_scrolls_before_stop = 1 if (max_age_hours and max_age_hours <= 12) else 3
+                if old_tail_count >= threshold_stop and scroll_idx >= min_scrolls_before_stop:
+                    logger.info(
+                        f"⏰ Đã vượt mốc thời gian {time_limit_desc} (phát hiện liên tiếp {old_tail_count} bài viết cũ hơn {time_limit_desc}). "
+                        "Tự động dừng cuộn tại đây để tối ưu dữ liệu và thời gian!"
+                    )
                     break
 
                 if new_height == prev_height and new_batch_count == 0:
                     stagnant_scrolls += 1
-                    if stagnant_scrolls >= 2:
-                        logger.info("No new content loaded after consecutive scrolls; stopping early.")
+                    if stagnant_scrolls >= 3:
+                        logger.info("Chạm đáy nhóm hoặc không có thêm nội dung mới sau 3 lần cuộn liên tiếp; kết thúc cuộn.")
                         break
                 else:
                     stagnant_scrolls = 0
@@ -806,7 +829,7 @@ class SeleniumFacebookSearchCollector(BaseCollector):
 
             seen_urls: set[str] = set()
             for item in raw_posts:
-                if len(posts) >= limit:
+                if effective_limit and len(posts) >= effective_limit:
                     break
                 content = (item.get("content") or "").strip()
                 post_url = self._clean_post_url(item.get("post_url") or "")
@@ -816,17 +839,23 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                 import re
                 if not post_url or re.match(r"^https?://[^/]+/groups/[^/]+/?(#.*)?$", post_url):
                     continue
+                if "/user/" in post_url or "profile.php" in post_url or "/hashtag/" in post_url:
+                    continue
                 if not content or post_url in seen_urls:
                     continue
-                seen_urls.add(post_url)
 
                 parsed_time = self._parse_time(raw_time)
-                if max_age_days:
-                    from utils.date_parser import is_within_days
-                    if not is_within_days(parsed_time, days=max_age_days):
-                        logger.debug(f"Bỏ qua bài viết cũ hơn {max_age_days} ngày: {parsed_time} ({post_url})")
+                # STRICT TIME FILTER: If parsed_time cannot be determined or is older than window, reject!
+                if max_age_hours or max_age_days:
+                    from utils.date_parser import is_within_time_window
+                    if parsed_time is None:
+                        logger.info(f"Bỏ qua bài viết không xác định được ngày đăng ({post_url})")
+                        continue
+                    if not is_within_time_window(parsed_time, hours=max_age_hours, days=max_age_days):
+                        logger.info(f"Bỏ qua bài viết cũ hơn {time_limit_desc} ({parsed_time}): {post_url}")
                         continue
 
+                seen_urls.add(post_url)
                 post_id = hashlib.sha1(post_url.encode("utf-8")).hexdigest()
                 posts.append(
                     FacebookPost(
@@ -834,7 +863,7 @@ class SeleniumFacebookSearchCollector(BaseCollector):
                         group_name="Facebook Search" if not group_url else group_url,
                         content=content,
                         author=author,
-                        post_time=parsed_time,
+                        post_time=parsed_time or datetime.now(),
                         post_url=post_url,
                     )
                 )

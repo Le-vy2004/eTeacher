@@ -12,7 +12,7 @@ try:
     import dotenv
 except ImportError:
     for venv_path in (BASE_DIR / ".venv", BASE_DIR.parent / ".venv"):
-        sites = list(venv_path.glob("lib/python*/site-packages"))
+        sites = list(venv_path.glob("lib/python*/site-packages")) + list(venv_path.glob("Lib/site-packages"))
         if sites:
             sys.path.insert(0, str(sites[0]))
             break

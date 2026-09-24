@@ -40,6 +40,8 @@ SHEET_HEADERS = [
     "Từ Khóa",
     "Thời Gian Thu Thập",
     "Phân Loại",
+    "Trạng Thái Kết Bạn",
+    "Thời Gian Kết Bạn",
 ]
 
 
@@ -127,10 +129,10 @@ class GoogleSheetsClient:
             headers = self.worksheet.row_values(1)
             if not headers:
                 logger.info("Sheet header is empty. Initializing column headers...")
-                self.worksheet.update([SHEET_HEADERS], "A1:M1")
+                self.worksheet.update([SHEET_HEADERS], "A1:O1")
             elif headers != SHEET_HEADERS:
                 logger.info("Updating worksheet headers to match required column structure...")
-                self.worksheet.update([SHEET_HEADERS], "A1:M1")
+                self.worksheet.update([SHEET_HEADERS], "A1:O1")
 
             # Pre-cache existing post URLs to prevent duplicate writes
             self._load_existing_urls()
@@ -154,19 +156,24 @@ class GoogleSheetsClient:
             return
 
         try:
-            url_col_idx = 6
+            import re
+            url_col_letter = "F"
             headers = self.worksheet.row_values(1)
-            if "🔗 Link Bài FB" in headers:
-                url_col_idx = headers.index("🔗 Link Bài FB") + 1
-            elif "Link bài viết" in headers:
-                url_col_idx = headers.index("Link bài viết") + 1
-            elif "Post URL" in headers:
-                url_col_idx = headers.index("Post URL") + 1
+            if headers:
+                for idx, h in enumerate(headers):
+                    if h in ("🔗 Link Bài FB", "Link bài viết", "Post URL"):
+                        url_col_letter = chr(ord("A") + idx)
+                        break
 
-            col_values = self.worksheet.col_values(url_col_idx)
-            # Skip row 1 (header)
-            urls = [url.strip() for url in col_values[1:] if url and url.strip()]
-            self._known_urls.update(urls)
+            col_formulas = self.worksheet.get(f"{url_col_letter}2:{url_col_letter}", value_render_option="FORMULA")
+            for row in col_formulas:
+                if row:
+                    val = str(row[0])
+                    m = re.search(r'https?://[^\s",;)]+', val)
+                    if m:
+                        self._known_urls.add(m.group(0).strip())
+                    elif val.startswith("http"):
+                        self._known_urls.add(val.strip())
         except Exception as e:
             logger.warning(f"Could not preload existing URLs from sheet: {e}")
 
@@ -203,9 +210,18 @@ class GoogleSheetsClient:
 
         try:
             row_data = lead.to_sheet_row()
-            self.worksheet.append_row(row_data, value_input_option="USER_ENTERED")
+            all_vals = self.worksheet.get_all_values()
+            next_row = len(all_vals) + 1
+            if next_row == 1:
+                self.worksheet.update([SHEET_HEADERS], "A1:O1")
+                next_row = 2
+
+            if next_row > self.worksheet.row_count:
+                self.worksheet.add_rows(50)
+
+            self.worksheet.update([row_data], f"A{next_row}", value_input_option="USER_ENTERED")
             self._known_urls.add(lead.post_url.strip())
-            logger.debug(f"Appended lead to Google Sheets: {lead.post_url}")
+            logger.debug(f"Appended lead to Google Sheets at row {next_row}: {lead.post_url}")
             return True
         except Exception as e:
             logger.error(f"Error appending lead to Google Sheets ({lead.post_url}): {e}")
@@ -225,21 +241,106 @@ class GoogleSheetsClient:
             return 0
 
         rows_to_append = []
+        new_leads = []
         for lead in leads:
             if not self.post_exists(lead.post_url):
                 rows_to_append.append(lead.to_sheet_row())
-                self._known_urls.add(lead.post_url.strip())
+                new_leads.append(lead)
 
         if not rows_to_append:
             return 0
 
         try:
-            self.worksheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
-            logger.info(f"Appended {len(rows_to_append)} leads to Google Sheets.")
+            all_vals = self.worksheet.get_all_values()
+            next_row = len(all_vals) + 1
+            if next_row == 1:
+                self.worksheet.update([SHEET_HEADERS], "A1:O1")
+                next_row = 2
+
+            needed_rows = next_row + len(rows_to_append) - 1
+            current_row_count = self.worksheet.row_count
+            if needed_rows > current_row_count:
+                self.worksheet.add_rows(max(100, needed_rows - current_row_count + 50))
+
+            target_range = f"A{next_row}"
+            self.worksheet.update(rows_to_append, target_range, value_input_option="USER_ENTERED")
+            for lead in new_leads:
+                self._known_urls.add(lead.post_url.strip())
+            logger.info(f"Appended {len(rows_to_append)} leads to Google Sheets starting at row {next_row}.")
             return len(rows_to_append)
         except Exception as e:
             logger.error(f"Error appending batch of leads to Google Sheets: {e}")
             return 0
+
+    def update_friend_status(
+        self,
+        row_number: int,
+        status: str,
+        requested_at: str | None = None,
+    ) -> bool:
+        """Update friend request status and timestamp in Google Sheets for a specific row."""
+        if not self.is_connected or not self.worksheet:
+            return False
+        try:
+            from datetime import datetime
+            ts = requested_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cell_range = f"N{row_number}:O{row_number}"
+            self.worksheet.update([[status, ts]], cell_range)
+            return True
+        except Exception as e:
+            logger.error(f"Error updating friend status at row {row_number}: {e}")
+            return False
+
+    def get_leads_to_friend(self, limit: int = 50) -> list[dict]:
+        """Fetch leads from Google Sheets that need a friend request sent."""
+        if not self.is_connected or not self.worksheet:
+            return []
+        try:
+            import re
+            raw_formulas = self.worksheet.get("A2:O", value_render_option="FORMULA")
+            if not raw_formulas:
+                return []
+
+            results = []
+            for idx, row in enumerate(raw_formulas, start=2):
+                if len(results) >= limit:
+                    break
+
+                # Column F (index 5) is Link Bài FB
+                raw_link = row[5] if len(row) > 5 else ""
+                url_match = re.search(r'https?://[^\s",;)]+', raw_link)
+                post_url = url_match.group(0) if url_match else raw_link.strip()
+
+                if not post_url or not post_url.startswith("http"):
+                    continue
+
+                # Column G (index 6) is Tên Người Đăng
+                author = row[6].strip() if len(row) > 6 else ""
+
+                # Column N (index 13) is Trạng Thái Kết Bạn
+                friend_status = row[13].strip() if len(row) > 13 else ""
+
+                # Skip if already processed successfully or marked as anonymous
+                if friend_status in (
+                    "Đã gửi kết bạn",
+                    "Đã là bạn bè",
+                    "Đã gửi trước đó",
+                    "Tài khoản ẩn danh (Bỏ qua)",
+                ):
+                    continue
+
+                results.append({
+                    "row_number": idx,
+                    "post_url": post_url,
+                    "author": author,
+                    "friend_status": friend_status,
+                })
+
+            return results
+        except Exception as e:
+            logger.error(f"Error retrieving leads to friend from Google Sheets: {e}")
+            return []
+
 
 
 

@@ -54,3 +54,33 @@ def test_is_within_30_days():
 
     two_months_ago = parse_facebook_time("2 tháng trước", ref)
     assert is_within_days(two_months_ago, days=30, reference_time=ref) is False
+
+
+def test_is_within_hours():
+    from utils.date_parser import is_within_hours, is_within_time_window
+    ref = datetime(2026, 9, 24, 14, 0, 0)
+
+    # 1 hour ago
+    p_1h = parse_facebook_time("1 giờ trước", ref)
+    assert is_within_hours(p_1h, hours=3, reference_time=ref) is True
+
+    # 2 hours ago
+    p_2h = parse_facebook_time("2 giờ trước", ref)
+    assert is_within_hours(p_2h, hours=3, reference_time=ref) is True
+
+    # 2.5 hours ago
+    p_2_5h = ref - timedelta(hours=2, minutes=30)
+    assert is_within_hours(p_2_5h, hours=3, reference_time=ref) is True
+
+    # 4 hours ago (OUT OF WINDOW)
+    p_4h = parse_facebook_time("4 giờ trước", ref)
+    assert is_within_hours(p_4h, hours=3, reference_time=ref) is False
+
+    # 20 hours ago (OUT OF WINDOW)
+    p_20h = parse_facebook_time("20 giờ trước", ref)
+    assert is_within_hours(p_20h, hours=3, reference_time=ref) is False
+
+    # 1 day ago (OUT OF WINDOW)
+    p_1d = parse_facebook_time("1 ngày", ref)
+    assert is_within_time_window(p_1d, hours=3, reference_time=ref) is False
+
